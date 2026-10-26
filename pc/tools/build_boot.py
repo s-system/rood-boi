@@ -11,6 +11,8 @@ import shutil
 import struct
 import sys
 
+import guest_base as guest_base_tool
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
     "--battle",
@@ -69,6 +71,15 @@ parser.add_argument(
     "symbol analysis on them (no ELF twins, no host gcc); the only mode on a "
     "Windows host (MSYS2)",
 )
+parser.add_argument(
+    "--guest-base",
+    type=lambda v: int(v, 0),
+    default=int(os.environ.get("ROOD_GUEST_BASE", "0"), 0),
+    help="--arch 64: map guest memory at BASE + its PS1 address (a multiple "
+    "of 4 GB; default $ROOD_GUEST_BASE, else 0), for hosts that cannot map the "
+    "low 4 GB (macOS and iOS on arm64); game units are rewritten by "
+    "pc/tools/guest_base.py",
+)
 parsed = parser.parse_args()
 win = parsed.target == "windows"
 # COFF-only: the analysis reads the PE/COFF objects themselves with MinGW's
@@ -77,6 +88,9 @@ coff = win and (parsed.coff or os.name == "nt")
 if win:
     parsed.arch = "64"
 arch64 = parsed.arch == "64"
+guest_base = parsed.guest_base if arch64 else 0
+if guest_base % (1 << 32):
+    raise SystemExit("--guest-base must be a multiple of 4 GB")
 engine_library = parsed.engine_library
 if engine_library and (win or not arch64):
     parser.error("--engine-library is the 64-bit Linux build only")
@@ -86,7 +100,7 @@ no_audio = parsed.no_audio
 
 root = pathlib.Path(__file__).resolve().parents[2]
 out = root / ("pc/build/win64" if win else "pc/build/dev64" if engine_library
-              else "pc/build/boot64" if arch64 else "pc/build/boot")
+              else ("pc/build/boot64-gb" if guest_base else "pc/build/boot64") if arch64 else "pc/build/boot")
 out.mkdir(parents=True, exist_ok=True)
 # One build at a time per output tree: every run recompiles the objects and then
 # renames symbols in place (name -> name__overlay), so a second run in the same
@@ -245,6 +259,10 @@ if arch64:
         "-Werror=pointer-to-int-cast",
         "-Werror=int-to-pointer-cast",
     ]
+    if guest_base:
+        # Data imports then sit above 4 GB, out of RIP-relative reach of
+        # the code: reach external data through the GOT.
+        flags += [f"-DROOD_GUEST_BASE={guest_base:#x}UL", "-mno-direct-extern-access"]
 # Per-file results of the 64-bit pass: (kind, source, returncode, stderr).
 arch64_results = []
 
@@ -397,6 +415,27 @@ def library_args(args):
     return args
 
 
+def guest_base_host(args):
+    """--guest-base: a host C unit (pc/src, compiled from source) gets the
+    game units' rewrite too (pc/tools/guest_base.py): it is preprocessed,
+    rewritten, and the rewritten .i is compiled with the same flags. C++
+    units and the generated tables are compiled as they are."""
+    if args[0] != "gcc" or "-c" not in args:
+        return args
+    sources = [a for a in args if str(a).endswith(".c")]
+    if len(sources) != 1 or "-DROOD_LUA_CORE" in args:
+        return args
+    unit = sources[0]
+    obj = pathlib.Path(args[args.index("-o") + 1])
+    pre = obj.with_suffix(".gb.i")
+    cpp = [a for a in args if a not in ("-c",)]
+    cpp[cpp.index("-o") + 1] = str(pre)
+    subprocess.run([cpp[0], "-E", *cpp[1:]], check=True, cwd=root)
+    data, _ = guest_base_tool.rewrite(pre.read_bytes(), guest_base)
+    pre.write_bytes(data)
+    return [str(pre) if a == unit else a for a in args]
+
+
 def compile_object(args, source, kind="c", win_args=None):
     """Compile one object; the 64-bit pass records failures and goes on.
     win_args: the twin's command when it differs (its own preprocessed input)."""
@@ -406,6 +445,8 @@ def compile_object(args, source, kind="c", win_args=None):
         return True
     if coff:
         return compile_twin(win_args or args, source, kind)
+    if guest_base:
+        args = guest_base_host(args)
     result = object_cache.compile(args)
     arch64_results.append((kind, str(source), result.returncode, result.stderr))
     if result.stderr and result.returncode == 0 and parsed.verbose:
@@ -1016,6 +1057,7 @@ game_cpp_flags = [
     "-Iinclude/psx",
     "-Isrc/include",
     *(["-iquote", str(out.relative_to(root) / "include"), "-DROOD_PC_LP64"] if arch64 else []),
+    *([f"-DROOD_GUEST_BASE={guest_base:#x}UL"] if guest_base else []),
     "-I.",
     "-D_LANGUAGE_C",
     "-DOBJDIFF",
@@ -1096,7 +1138,10 @@ for source, name in sources:
     if not coff:
         encoded = result_cache.run([sys.executable, "-m", "tools.etc.vsStringTransformer"], root,
                                    files=sorted((root / "tools/etc").glob("vsString*.py")), input=cpp.stdout)
-        pre.write_bytes(route_definitions(encoded, source))
+        encoded = route_definitions(encoded, source)
+        if guest_base:
+            encoded = guest_base_tool.rewrite(encoded, guest_base)[0]
+        pre.write_bytes(encoded)
     obj = out / (name + ".o")
     # main.c and MAINMENU statics that only other code calls (by address on
     # the PS1) must survive compilation to be exposed below.
@@ -1266,6 +1311,8 @@ if not arch64:
 audio_vendor = root / "pc/third_party/psycross-audio"
 cxx_flags = (["-m64", "-O2", "-std=c++17", "-fpie", "-g"] if arch64 else
              ["-m32", "-O2", "-std=c++17", "-fno-pie", "-fno-pic", "-g"]) + debug_compress_flags
+if guest_base:
+    cxx_flags += [f"-DROOD_GUEST_BASE={guest_base:#x}UL"]
 probe_cxx = None if coff else subprocess.run(
     ["g++", *cxx_flags, "-x", "c++", "-fsyntax-only", "-"],
     input=b"#include <vector>\n",
@@ -2086,6 +2133,9 @@ def lp64_native_imports():
             definitions.append(f"{attributes} unsigned long long {region}[{count}];")
         else:
             words = struct.unpack_from(f"<{count}I", content)
+            # Guest addresses become host pointers: plus the guest base.
+            words = [w + guest_base if w and (0x80000000 <= w < 0x80200000 or 0x1F800000 <= w < 0x1F802000) else w
+                     for w in words]
             definitions.append(f"{attributes} unsigned long long {region}[{count}] = {{ "
                                + ", ".join(f"{w:#x}" for w in words) + " };")
         for name in names:
@@ -2148,7 +2198,7 @@ for name in sorted(missing):
             raise RuntimeError(
                 f"Data import {name} at {address:#x} is outside mapped guest memory"
             )
-        assign.append(f"{name} = 0x{address:08x};")
+        assign.append(f"{name} = 0x{guest_base + address:08x};")
     elif name in calls or name in functions:
         traps.append(name)
     else:
@@ -2381,7 +2431,7 @@ if engine_library:
         engine_boundary.publish_library(staged, library)
     except (RuntimeError, ValueError, OSError) as error:
         raise SystemExit(f"engine library boundary: {error}")
-    host_link = ["gcc", "-m64", "-no-pie", "-Wl,--section-start=rood_guest_pages=0x1f800000",  # as the static link
+    host_link = ["gcc", "-m64", "-no-pie", f"-Wl,--section-start=rood_guest_pages={guest_base + 0x1f800000:#x}",  # as the static link
                  "-Wl,--gc-sections", *link_compress_flags,
                  *[str(o) for o in host_objects], str(out / "engine_boundary.o"), *pin_args, str(out / "imports.ld"),
                  "-Wl,--dynamic-list=" + str(out / "host_exports.list"),
@@ -2415,7 +2465,7 @@ link = (
         *(["-m64", "-no-pie"] if arch64 else ["-m32", "-no-pie", "-Wl,-Ttext-segment=0x00400000"]),
         # The scratchpad and the I/O page (boot_runtime.c): the image's last
         # pages, so the heap starts above them.
-        "-Wl,--section-start=rood_guest_pages=0x1f800000",
+        f"-Wl,--section-start=rood_guest_pages={guest_base + 0x1f800000:#x}",
         "-Wl,--gc-sections",
         *link_compress_flags,
         *[str(o) for o in objects],

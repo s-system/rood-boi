@@ -417,6 +417,9 @@ static LONG WINAPI pc_exception(EXCEPTION_POINTERS* info)
  * the same; elsewhere (taken) only resuming in a new process is lost. Host
  * statics (.data.rood_host): a snapshot of this unit's state must not carry
  * another process's. */
+#ifndef ROOD_GUEST_BASE
+#define ROOD_GUEST_BASE 0UL /* build_boot.py --guest-base; pc/src/psx_types.h */
+#endif
 #define GAME_STACK_BASE 0x60000000u
 static char* game_stack __attribute__((section(".data.rood_host"))) = NULL;
 static int game_stack_fixed __attribute__((section(".data.rood_host"))) = 0;
@@ -465,7 +468,7 @@ static void run_game(void) { vs_main_exec(); }
  * before the window: a save state (snapshot.c) holds the game's stack and
  * resumes it in a new process, where every saved frame pointer and return
  * address must mean the same. Elsewhere (taken) only snapshots are lost. */
-#define GAME_STACK_BASE 0x60000000u
+#define GAME_STACK_BASE (ROOD_GUEST_BASE + 0x60000000u)
 #define GAME_STACK_SIZE (64u << 20)
 static char* game_stack;
 static int game_stack_fixed;
@@ -480,7 +483,7 @@ static void reserve_game_stack(void)
     }
     if (p != MAP_FAILED)
         munmap(p, GAME_STACK_SIZE); /* an old kernel's hint, not the address */
-    fprintf(stderr, "[snapshot] game stack: 0x%x is taken; save states are off\n", GAME_STACK_BASE);
+    fprintf(stderr, "[snapshot] game stack: %#lx is taken; save states are off\n", (unsigned long)GAME_STACK_BASE);
     FILE* maps = fopen("/proc/self/maps", "r"); /* by what */
     char line[512];
     while (maps && fgets(line, sizeof line, maps)) {
@@ -490,6 +493,12 @@ static void reserve_game_stack(void)
     }
     if (maps)
         fclose(maps);
+    if (ROOD_GUEST_BASE) {
+        /* Game code keeps addresses of its locals in 4-byte fields: the
+         * stack must be inside the guest window. */
+        fprintf(stderr, "game stack: no room at %#lx in the guest window\n", (unsigned long)GAME_STACK_BASE);
+        exit(1);
+    }
     p = mmap(NULL, GAME_STACK_SIZE, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (sizeof(void*) == 8 ? MAP_32BIT : 0), -1, 0);
     if (p == MAP_FAILED || (uintptr_t)p + GAME_STACK_SIZE > 0x80000000u) {
@@ -527,7 +536,7 @@ static void* map_guest(uintptr_t address, size_t size)
     return p == MAP_FAILED ? NULL : p;
 #endif
 }
-#ifndef _WIN32
+#if !defined(_WIN32) && !ROOD_GUEST_BASE
 /* The scratchpad and the I/O page are part of the image (build_boot.py links
  * this section at 0x1f800000): the kernel starts the heap (brk) at a random
  * point up to 1 GB past the image's end (x86-64), and the pinned game region
@@ -590,16 +599,17 @@ int main(int argc, char** argv)
     /* Guest memory first: the window's graphics driver (Vulkan and its
      * layers especially) maps memory of its own, which must not land in the
      * guest's fixed ranges. */
-    void* ram = map_guest(0x80000000, 0x200000);
-#ifdef _WIN32
+    void* ram = map_guest(ROOD_GUEST_BASE + 0x80000000, 0x200000);
+#if defined(_WIN32) || ROOD_GUEST_BASE
     /* Windows reserves in 64 KB granules: the scratchpad and the I/O page
-     * (below) are one allocation. */
-    void* scratch = map_guest(0x1f800000, 0x2000);
+     * (below) are one allocation. With a guest base they are mapped like
+     * the RAM, inside the guest window. */
+    void* scratch = map_guest(ROOD_GUEST_BASE + 0x1f800000, 0x2000);
     void* io = scratch;
 #else
-    if (pc_guest_pages != (char*)(uintptr_t)0x1f800000) {
-        fprintf(stderr, "guest mapping: rood_guest_pages is linked at %p, not 0x1f800000 (build_boot.py)\n",
-            (void*)pc_guest_pages);
+    if (pc_guest_pages != (char*)(uintptr_t)(ROOD_GUEST_BASE + 0x1f800000)) {
+        fprintf(stderr, "guest mapping: rood_guest_pages is linked at %p, not %#lx (build_boot.py)\n",
+            (void*)pc_guest_pages, (unsigned long)(ROOD_GUEST_BASE + 0x1f800000));
         return 1;
     }
     void* scratch = pc_guest_pages;

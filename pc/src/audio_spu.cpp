@@ -31,7 +31,10 @@ static uint16_t last_mode[6];
 static uint16_t last_main[2] = { 0xffff, 0xffff }, last_control = 0xffff;
 
 /* 0x1F801C00: 24 voices x 16 bytes, then the common registers. */
-static volatile uint16_t* const regs = reinterpret_cast<volatile uint16_t*>(0x1F801C00);
+#ifndef ROOD_GUEST_BASE
+#define ROOD_GUEST_BASE 0UL /* build_boot.py --guest-base; pc/src/psx_types.h */
+#endif
+static volatile uint16_t* const regs = reinterpret_cast<volatile uint16_t*>(ROOD_GUEST_BASE + 0x1F801C00);
 
 extern "C" {
 PsyX_SfxOverrideFn g_PsyX_SfxOverride = nullptr;

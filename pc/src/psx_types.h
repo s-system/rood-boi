@@ -47,6 +47,19 @@
 
 #if defined(ROOD_PC_LP64) /* only the PC passes it */
 
+/* Where guest memory is mapped: at BASE + its PS1 address, BASE a multiple
+ * of 4 GB, so a guest pointer's low 32 bits are its PS1 address. Zero where
+ * the low 4 GB can be mapped (Linux, Windows); macOS and iOS on arm64 cannot,
+ * and build_boot.py --guest-base passes the base (pc/tools/guest_base.py). */
+#ifndef ROOD_GUEST_BASE
+#define ROOD_GUEST_BASE 0UL
+#endif
+/* A 32-bit guest address as a host pointer value: zero stays null. */
+#define psx_guest_(value)                                                      \
+    ((__UINTPTR_TYPE__)(__UINT32_TYPE__)(value)                                \
+         ? ROOD_GUEST_BASE | (__UINTPTR_TYPE__)(__UINT32_TYPE__)(value)       \
+         : (__UINTPTR_TYPE__)0)
+
 /* A 4-byte, 4-aligned guest address that remembers its target type T. The
  * zero-length member costs no storage; only its type is used. */
 #define psx_ptr(T)                                                             \
@@ -56,20 +69,20 @@
     }
 
 /* Called when native code stores a host pointer that has no guest address
- * (above 4 GB); provided by the runtime. */
+ * (outside the 4 GB from ROOD_GUEST_BASE); provided by the runtime. */
 extern void pc_psx_bad_pointer(const void* pointer)
     __attribute__((noreturn));
 
 static inline __UINT32_TYPE__ psx_addr(const void* pointer) {
     __UINTPTR_TYPE__ value = (__UINTPTR_TYPE__)pointer;
-    if (value >> 32) {
+    if ((value >> 32) != (ROOD_GUEST_BASE >> 32) && value) {
         pc_psx_bad_pointer(pointer);
     }
     return (__UINT32_TYPE__)value;
 }
 
 #define psx_get(field)                                                         \
-    ((__typeof__((field).psx_type_[0]))(__UINTPTR_TYPE__)(field).raw)
+    ((__typeof__((field).psx_type_[0]))psx_guest_((field).raw))
 /* The unevaluated assignment to a T* keeps the type check (and warnings) a
  * plain assignment has; a conditional would also reject char* -> u_char*. */
 #define psx_set(field, pointer)                                                \
@@ -105,8 +118,7 @@ static inline __UINT32_TYPE__ psx_addr(const void* pointer) {
  * (sound command parameters, offsets added to a pointer's address): the
  * integer is zero-extended (a sign-extended 0x80000000 would be a bad
  * pointer) and the pointer is checked to have a guest address. */
-#define psx_to_ptr(T, value)                                                   \
-    ((T)(__UINTPTR_TYPE__)(__UINT32_TYPE__)(value))
+#define psx_to_ptr(T, value) ((T)psx_guest_(value))
 #define psx_to_int(T, pointer) ((T)psx_addr(pointer))
 /* A pointer or an integer as a 32-bit word, for SDK macros that take either
  * (setaddr: a primitive or a link word). Pointers are checked like
