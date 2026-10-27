@@ -8,4 +8,7 @@ loader=/opt/homebrew/lib/libvulkan.dylib
 if [ -z "$ROOD_RENDERER" ] && [ -e "$loader" ]; then
     export ROOD_RENDERER=vulkan SDL_VULKAN_LIBRARY="$loader"
 fi
+# Settings saved across runs, as pc/run-game.sh keeps them.
+mkdir -p pc/user
+export ROOD_SETTINGS="${ROOD_SETTINGS:-pc/user/settings.cfg}"
 exec pc/build/macos/rood --window "$@"
