@@ -321,6 +321,9 @@ def link(manifest, out):
             # null at run time, as an undefined weak symbol is on ELF.
             "-Wl,-undefined,dynamic_lookup"]
     (out / "link_command.json").write_text(json.dumps(args) + "\n")
+    # The runtime writes its diagnostic frames to ROOD_OUT, by default
+    # pc/build/boot (on Linux pc/run-game.sh's build makes it).
+    (root / "pc/build/boot").mkdir(parents=True, exist_ok=True)
     return subprocess.run(args, cwd=root, capture_output=True, text=True)
 
 
