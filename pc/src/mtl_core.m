@@ -32,6 +32,7 @@
 #include <SDL3/SDL_metal.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <MetalFX/MetalFX.h>
 #include <dispatch/dispatch.h>
 #include <mach-o/dyld.h>
 #include <CommonCrypto/CommonDigest.h>
@@ -2046,6 +2047,76 @@ static void install_entry_points(void)
     vkGetSwapchainImagesKHR = swapchain_images;
     vkAcquireNextImageKHR = acquire_next_image;
     vkQueuePresentKHR = queue_present;
+}
+
+/* ---- MetalFX (vk_present.c): the lit image magnified to the view ----
+ * Lighting runs at the internal resolution (vk_present.c lit_internal); its
+ * picture is enlarged to the window by MetalFX's spatial scaler instead of
+ * a bilinear draw: edges and texels stay sharp on a Retina window. The
+ * scaler writes a whole texture, so it goes to one of the view's size, then
+ * to the destination's rectangle. 0: unavailable (the caller draws). */
+int mtl_upscale(const vk_image* source, int src_w, int src_h, const vk_image* dest, int x, int y, int w, int h)
+{
+    static id<MTLFXSpatialScaler> scaler;
+    static id<MTLTexture> output;
+    static int in_w, in_h, out_w, out_h;
+    static VkFormat in_format, out_format;
+    static int unavailable = -1;
+    if (unavailable < 0) {
+        const char* v = getenv("ROOD_METALFX");
+        unavailable = (v && *v == '0') || ![MTLFXSpatialScalerDescriptor supportsDevice:device];
+        if (unavailable)
+            fprintf(stderr, "[mtl] MetalFX off: the view is magnified bilinearly\n");
+    }
+    if (unavailable || !source->image || !dest->image || w <= 0 || h <= 0)
+        return 0;
+    if (!scaler || in_w != src_w || in_h != src_h || out_w != w || out_h != h || in_format != source->format
+        || out_format != dest->format) {
+        [scaler release];
+        [output release];
+        MTLFXSpatialScalerDescriptor* d = [[MTLFXSpatialScalerDescriptor new] autorelease];
+        d.inputWidth = (NSUInteger)src_w, d.inputHeight = (NSUInteger)src_h;
+        d.outputWidth = (NSUInteger)w, d.outputHeight = (NSUInteger)h;
+        d.colorTextureFormat = pixel_format(source->format);
+        d.outputTextureFormat = pixel_format(dest->format);
+        d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual; /* display-referred by now */
+        scaler = [d newSpatialScalerWithDevice:device];
+        MTLTextureDescriptor* t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixel_format(dest->format)
+                                                                                     width:(NSUInteger)w
+                                                                                    height:(NSUInteger)h
+                                                                                 mipmapped:NO];
+        t.storageMode = MTLStorageModePrivate;
+        t.usage = scaler ? scaler.outputTextureUsage : MTLTextureUsageShaderWrite;
+        output = scaler ? [device newTextureWithDescriptor:t] : nil;
+        in_w = src_w, in_h = src_h, out_w = w, out_h = h, in_format = source->format, out_format = dest->format;
+        if (!scaler || !output) {
+            fprintf(stderr, "[mtl] MetalFX scaler %dx%d -> %dx%d unavailable\n", src_w, src_h, w, h);
+            [scaler release], scaler = nil;
+            unavailable = 1;
+            return 0;
+        }
+        fprintf(stderr, "[mtl] MetalFX: %dx%d -> %dx%d\n", src_w, src_h, w, h);
+    }
+    if (rendering)
+        vk_end_rendering();
+    end_encoder();
+    vk_cmd();
+    scaler.colorTexture = ((mtl_image*)source->image)->texture;
+    scaler.inputContentWidth = (NSUInteger)src_w;
+    scaler.inputContentHeight = (NSUInteger)src_h;
+    scaler.outputTexture = output;
+    [scaler encodeToCommandBuffer:rec.cb];
+    [blit_encoder() copyFromTexture:output
+                        sourceSlice:0
+                        sourceLevel:0
+                       sourceOrigin:MTLOriginMake(0, 0, 0)
+                         sourceSize:MTLSizeMake((NSUInteger)w, (NSUInteger)h, 1)
+                          toTexture:((mtl_image*)dest->image)->texture
+                   destinationSlice:0
+                   destinationLevel:0
+                  destinationOrigin:MTLOriginMake((NSUInteger)x, (NSUInteger)y, 0)];
+    end_encoder();
+    return 1;
 }
 
 /* ---- the developer overlay and modern menus (vk_overlay.cpp) ---- */

@@ -84,14 +84,15 @@ void pc_window_wait_fraction(int k, int n)
 }
 /* The window at the display's full pixel density (Retina): every present
  * pass then shades 4x the pixels. ROOD_HIDPI=1/0; by default on except on
- * macOS, whose integrated GPUs cannot light a Retina window per pixel at
- * 60 Hz (the system scales the window up). */
+ * macOS without Metal, whose integrated GPUs cannot light a Retina window
+ * per pixel at 60 Hz (the system scales the window up). On Metal lighting
+ * runs at the internal resolution and MetalFX enlarges it (mtl_upscale). */
 int pc_window_high_density(void)
 {
     const char* v = getenv("ROOD_HIDPI");
     if (v && *v)
         return *v != '0';
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(ROOD_METAL)
     return 0;
 #else
     return 1;

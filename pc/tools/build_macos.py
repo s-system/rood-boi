@@ -296,7 +296,7 @@ def compile_host(obj, command, edits, out, table, base):
     return target, subprocess.run(args, cwd=root, capture_output=True, text=True)
 
 
-FRAMEWORKS = ["Metal", "QuartzCore", "Cocoa", "IOKit", "CoreAudio", "AudioToolbox", "CoreVideo", "Carbon", "ForceFeedback",
+FRAMEWORKS = ["Metal", "MetalFX", "QuartzCore", "Cocoa", "IOKit", "CoreAudio", "AudioToolbox", "CoreVideo", "Carbon", "ForceFeedback",
               "GameController", "Metal", "QuartzCore", "CoreHaptics", "UniformTypeIdentifiers",
               "AVFoundation", "CoreMedia", "OpenGL"]
 

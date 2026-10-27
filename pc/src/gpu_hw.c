@@ -1349,7 +1349,11 @@ void pc_hw_init(const uint16_t* vram)
     if (backend && !strcmp(backend, "null"))
         return; /* CPU rasterization owns VRAM; no graphics target, even if called explicitly. */
     const char* setting = getenv("ROOD_SCALE");
+#ifdef ROOD_METAL
+    int scale = setting ? atoi(setting) : 3; /* MetalFX enlarges it to the window (mtl_upscale) */
+#else
     int scale = setting ? atoi(setting) : 4;
+#endif
     if (scale < 1)
         return;
     pc_hw_scale = scale > 8 ? 8 : scale;

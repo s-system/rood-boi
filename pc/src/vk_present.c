@@ -21,6 +21,7 @@ int pc_vk_shadows_sun(const float dir[3], float matrix[16], float light[4], floa
 #include <SDL3/SDL_vulkan.h>
 #ifdef ROOD_METAL
 int mtl_create_surface(SDL_Window* window, VkSurfaceKHR* out); /* mtl_core.m: the window's CAMetalLayer */
+int mtl_upscale(const vk_image* source, int src_w, int src_h, const vk_image* dest, int x, int y, int w, int h);
 #endif
 #include <math.h>
 #include <stdio.h>
@@ -1305,6 +1306,20 @@ void pc_vk_present(const uint16_t* vram, int x, int y, int w, int h)
                 vk_grade(&post_frame, source, lit_w, lit_h, view_w, view_h, input, last ? view_x : 0, last ? view_y : 0,
                     last);
             }
+#ifdef ROOD_METAL
+            /* Magnifying (lighting at the internal resolution): MetalFX into the stage's target. */
+            if (ssaa && lit_w < view_w && lit_h < view_h) {
+                vk_section("upscale");
+                const vk_image* dest = stage + 2 >= stages ? &window_image
+                    : brightness_stage && stage + 3 >= stages ? &brightness_input.image
+                                                              : NULL;
+                int dx = dest == &window_image ? view_x : 0, dy = dest == &window_image ? view_y : 0;
+                if (dest && mtl_upscale(input, lit_w, lit_h, dest, dx, dy, view_w, view_h)) {
+                    ++stage;
+                    ssaa = 0;
+                }
+            }
+#endif
             if (ssaa) {
                 vk_section("downsample");
                 const vk_image* source = input;
