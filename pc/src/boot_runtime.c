@@ -13,15 +13,58 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h> /* _dyld_get_image_header: the image under ASLR */
 #include <mach/mach.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE /* iOS has no mach_vm.h: the vm_ calls take 64-bit addresses there */
+#include <mach/vm_map.h> /* (mach_vm_address_t is there too: uint64_t, as vm_address_t is unsigned long) */
+#define mach_vm_allocate(t, a, s, f) vm_allocate(t, (vm_address_t*)(a), s, f)
+#define mach_vm_deallocate vm_deallocate
+#define mach_vm_protect vm_protect
+#define mach_vm_remap(t, a, s, m, f, st, sa, c, cp, mp, i) vm_remap(t, (vm_address_t*)(a), s, m, f, st, sa, c, cp, mp, i)
+#define mach_vm_region_recurse(t, a, s, d, i, c) vm_region_recurse_64(t, (vm_address_t*)(a), (vm_size_t*)(s), d, i, c)
+#else
 #include <mach/mach_vm.h>
+#endif
 /* Zeroed read-write memory at exactly `address`, or NULL when anything is
  * mapped there: Linux's MAP_FIXED_NOREPLACE. (Darwin's mmap takes an address
  * without MAP_FIXED as a loose hint, and MAP_FIXED replaces what is there:
  * arm64 macOS reserves 0x180000000 up 8 GB for the dyld shared cache.) */
+#if ROOD_GUEST_BASE
+/* The 4 GB guest window, reserved (no access, no memory) as the process
+ * starts, before the frameworks' initializers and the first large
+ * allocations (which macOS and iOS place from 0x7000000000 up) can land in
+ * it; the guest's ranges are then mapped over the reservation. */
+static int guest_window_reserved;
+__attribute__((constructor(101))) static void reserve_guest_window(void)
+{
+    mach_vm_address_t at = ROOD_GUEST_BASE;
+    if (mach_vm_allocate(mach_task_self(), &at, 1ull << 32, VM_FLAGS_FIXED) == KERN_SUCCESS) {
+        mach_vm_protect(mach_task_self(), at, 1ull << 32, FALSE, VM_PROT_NONE);
+        guest_window_reserved = 1;
+        return;
+    }
+    /* What holds it: the first mapping inside the window (its VM tag). */
+    mach_vm_address_t address = ROOD_GUEST_BASE;
+    mach_vm_size_t size = 0;
+    natural_t depth = 64;
+    struct vm_region_submap_info_64 info;
+    mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+    if (mach_vm_region_recurse(mach_task_self(), &address, &size, &depth, (vm_region_recurse_info_t)&info, &count)
+        == KERN_SUCCESS)
+        fprintf(stderr, "[lp64] the guest window is taken at start: %#llx + %#llx (tag %u, prot %d)\n",
+            (unsigned long long)address, (unsigned long long)size, info.user_tag, info.protection);
+}
+static int in_guest_window(uintptr_t address, size_t size)
+{
+    return guest_window_reserved && address >= ROOD_GUEST_BASE && address + size <= ROOD_GUEST_BASE + (1ull << 32);
+}
+#else
+static int in_guest_window(uintptr_t address, size_t size) { (void)address, (void)size; return 0; }
+#endif
 static void* pc_map_fixed(uintptr_t address, size_t size)
 {
     mach_vm_address_t at = address;
-    return mach_vm_allocate(mach_task_self(), &at, size, VM_FLAGS_FIXED) == KERN_SUCCESS ? (void*)(uintptr_t)at : NULL;
+    int flags = VM_FLAGS_FIXED | (in_guest_window(address, size) ? VM_FLAGS_OVERWRITE : 0); /* (only our reservation there) */
+    return mach_vm_allocate(mach_task_self(), &at, size, flags) == KERN_SUCCESS ? (void*)(uintptr_t)at : NULL;
 }
 #endif
 #include <time.h>
@@ -451,7 +494,7 @@ static uint32_t image_alias; /* the alias's guest address (0: none) */
 static uintptr_t image_start, image_end;
 /* Whether guest [at, at + size) holds no mapping (the drivers map memory
  * of their own; the window must be outside the dyld shared region:
- * build_boot.py --guest-base 0x10000000000). */
+ * build_boot.py --guest-base 0x10000000000 on the Mac, 0x7f00000000 on iOS). */
 static int guest_room(uint64_t at, uint64_t size)
 {
     mach_vm_address_t lo = ROOD_GUEST_BASE + at, hi = lo + size, address = lo;
@@ -497,12 +540,14 @@ static void alias_image(void)
     for (size_t k = 0; k < sizeof spans / sizeof spans[0]; k++)
         for (uint64_t at = spans[k].lo; at + size <= spans[k].hi; at += 0x1000000u) {
             mach_vm_address_t text = ROOD_GUEST_BASE + at, data = text + text_size;
-            if (!guest_room(at, size))
+            int ours = in_guest_window(ROOD_GUEST_BASE + at, size); /* the reservation: the spans are free */
+            if (!ours && !guest_room(at, size))
                 continue;
-            if ((last = mach_vm_allocate(mach_task_self(), &text, text_size, VM_FLAGS_FIXED)) != KERN_SUCCESS)
+            int fixed = VM_FLAGS_FIXED | (ours ? VM_FLAGS_OVERWRITE : 0);
+            if ((last = mach_vm_allocate(mach_task_self(), &text, text_size, fixed)) != KERN_SUCCESS)
                 continue;
             vm_prot_t current, maximum;
-            last = mach_vm_remap(mach_task_self(), &data, size - text_size, 0, VM_FLAGS_FIXED, mach_task_self(),
+            last = mach_vm_remap(mach_task_self(), &data, size - text_size, 0, fixed, mach_task_self(),
                 (mach_vm_address_t)(start + text_size), FALSE, &current, &maximum, VM_INHERIT_NONE);
             if (last != KERN_SUCCESS) {
                 mach_vm_deallocate(mach_task_self(), text, text_size);
@@ -709,6 +754,20 @@ char* pc_game_stack(size_t* size)
     return game_stack_fixed ? game_stack : NULL;
 }
 void pc_game_stack_entered(void) { } /* Windows keeps stack bounds per thread */
+#if defined(__APPLE__) && defined(__aarch64__)
+/* iOS has no working ucontext (getcontext fails), and macOS's is deprecated:
+ * on Apple's arm64 the game is called on its stack by hand. fp and lr are
+ * kept on the host stack, the host sp at the game stack's top; the game's
+ * frames chain to that record (backtraces and unwinding cross over). */
+extern void rood_call_on_stack(void* top, void (*fn)(void));
+__asm__(".text\n.globl _rood_call_on_stack\n.p2align 2\n"
+        "_rood_call_on_stack:\n"
+        " stp x29, x30, [sp, #-16]!\n mov x29, sp\n mov x9, sp\n"
+        " and x0, x0, #-16\n mov sp, x0\n str x9, [sp, #-16]!\n"
+        " blr x1\n"
+        " ldr x9, [sp], #16\n mov sp, x9\n ldp x29, x30, [sp], #16\n ret\n");
+static void run_game_on_low_stack(void) { rood_call_on_stack(game_stack + GAME_STACK_SIZE - 64, run_game); }
+#else
 static void run_game_on_low_stack(void)
 {
     getcontext(&game_context);
@@ -718,6 +777,7 @@ static void run_game_on_low_stack(void)
     makecontext(&game_context, run_game, 0);
     swapcontext(&host_context, &game_context);
 }
+#endif
 #endif
 /* Guest memory at its PS1 addresses (RAM, scratchpad, the I/O page); NULL
  * when a range is taken. */
@@ -746,6 +806,54 @@ __asm__(".section rood_guest_pages,\"aw\",@nobits\n"
         "pc_guest_pages: .space 0x2000\n"
         ".previous");
 extern char pc_guest_pages[];
+#endif
+#ifdef ROOD_IOS
+/* iPhone: UIKit starts the app (SDL_RunApp, below), and the game's relative
+ * paths need a working directory: Documents/game, writable (saves, settings,
+ * pc/build/boot), with links to the read-only data in the app bundle (the
+ * disc, its extracted files, the assets). */
+#define SDL_MAIN_HANDLED /* (main stays the game's; SDL_RunApp is called below) */
+#include <SDL3/SDL_main.h>
+#include <sys/stat.h>
+static void ios_files(void)
+{
+    char exe[1024], bundle[1024], home[1024];
+    uint32_t n = sizeof exe;
+    if (_NSGetExecutablePath(exe, &n) != 0)
+        return;
+    snprintf(bundle, sizeof bundle, "%s", exe);
+    char* slash = strrchr(bundle, '/');
+    if (slash)
+        *slash = 0;
+    snprintf(home, sizeof home, "%s/Documents/game", getenv("HOME") ? getenv("HOME") : "/tmp");
+    static const char* const dirs[] = { "", "/pc", "/pc/save", "/pc/save/states", "/pc/user", "/pc/build",
+        "/pc/build/boot", "/pc/lights", "/pc/exports", "/pc/third_party" };
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+        char d[1200];
+        snprintf(d, sizeof d, "%s%s", home, dirs[i]);
+        mkdir(d, 0755);
+    }
+    static const char* const links[] = { "disks", "data", "lighting", "pc/assets", "pc/plugins", "pc/third_party/fonts" };
+    for (size_t i = 0; i < sizeof links / sizeof links[0]; i++) {
+        char from[1200], to[1200];
+        snprintf(from, sizeof from, "%s/game/%s", bundle, links[i]);
+        snprintf(to, sizeof to, "%s/%s", home, links[i]);
+        unlink(to); /* the bundle's path changes with every install */
+        symlink(from, to);
+    }
+    chdir(home);
+    /* First launch: the port's modern defaults (16:9, smoothed textures, MSAA). */
+    FILE* settings = fopen("pc/user/settings.cfg", "r");
+    if (settings)
+        fclose(settings);
+    else if ((settings = fopen("pc/user/settings.cfg", "w"))) {
+        fputs("widescreen 1\nsmooth_textures 1\nsubpixel 1\nperspective_textures 1\naa msaa4\n", settings);
+        fclose(settings);
+    }
+    setenv("ROOD_RENDERER", "metal", 0);
+    setenv("ROOD_SETTINGS", "pc/user/settings.cfg", 0);
+}
+#define main rood_main
 #endif
 int main(int argc, char** argv)
 {
@@ -1731,3 +1839,18 @@ void pc_battle_frame_complete(void)
         "OPENING SCRIPT CHECKPOINT: original VKP Headquarters card rendered; not gameplay");
     exit(0);
 }
+#ifdef ROOD_IOS
+#undef main
+/* UIKit's application first; the game's main (with a window) from its launch. */
+static int ios_main(int argc, char** argv)
+{
+    (void)argc, (void)argv;
+    ios_files();
+    static char* args[] = { "rood", "--window", NULL };
+    return rood_main(2, args);
+}
+int main(int argc, char** argv)
+{
+    return SDL_RunApp(argc, argv, ios_main, NULL);
+}
+#endif

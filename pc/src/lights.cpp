@@ -237,7 +237,12 @@ static void suggest(bool wait = false)
     snprintf(status, sizeof status, "Suggesting lights from vertex colours...");
     // Detached: a joinable static std::thread would abort the game at exit
     // if a fit were still running.
+#ifdef ROOD_IOS
+    (void)command;
+    suggest_state = 3; /* (the editor's light fit runs a Python script: none on iPhone) */
+#else
     std::thread([command] { suggest_state = system(command.c_str()) == 0 ? 2 : 3; }).detach();
+#endif
     if (wait) {
         while (suggest_state.load() == 1)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));

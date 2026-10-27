@@ -1,6 +1,8 @@
 /* macOS: Apple's OpenGL 4.1 core headers stand in for <GL/gl.h> (build_macos.py). */
 #pragma once
 #define GL_SILENCE_DEPRECATION 1
+/* (iOS has no OpenGL: build_macos.py --ios copies the macOS SDK's headers
+ * into its include directory; the GL renderer is never chosen there.) */
 #include <OpenGL/gl3.h>
 #include <OpenGL/gl3ext.h>
 /* OpenGL 4.2-4.6 enums Apple's 4.1 headers lack (glcorearb.h values). The

@@ -35,7 +35,17 @@ root = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(root / "pc/tools"))
 import guest_base as guest_base_tool  # noqa: E402
 
-TARGET = "arm64-apple-macos14.0"
+# --ios: the same build for iPhone (iPhoneOS SDK through SDKROOT, pc/build/ios).
+IOS = "--ios" in sys.argv
+# The Linux guest-base build each links: the iPhone's window is at 0x7F00000000
+# (iOS maps nothing above 512 GB), the Mac's at 1 TB (macOS reserves ranges of
+# ~12 GB at random places from 0x7000000000 up at launch). build_boot.py
+# writes pc/build/boot64-gb: the iPhone's is that build copied to -ios.
+LINUX_OUT = "pc/build/boot64-gb-ios" if IOS else "pc/build/boot64-gb"
+TARGET = "arm64-apple-ios26.0" if IOS else "arm64-apple-macos14.0"
+if IOS:
+    os.environ["SDKROOT"] = subprocess.run(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], capture_output=True,
+                                           text=True).stdout.strip()
 # gcc flags with no clang meaning (or a different one), dropped from commands.
 DROP = {"-m64", "-m32", "-fpie", "-fno-pie", "-fno-pic", "-no-pie", "-fpermissive", "-mno-direct-extern-access",
         "-fkeep-static-functions", "-fgnu89-inline", "-fno-gnu-unique", "-MD"}
@@ -49,10 +59,11 @@ DROP_PREFIX = ("-gz", "-Werror", "-mcmodel", "-fcf-protection", "-MF", "-MT", "-
 # --moltenvk builds it on Vulkan through MoltenVK (pc/build/macos-vk).
 METAL = "--moltenvk" not in sys.argv
 if METAL:
-    HOST_DARWIN_METAL = ["-DROOD_METAL"]
+    HOST_DARWIN_METAL = ["-DROOD_METAL"] + (["-DROOD_IOS"] if IOS else [])
 else:
     HOST_DARWIN_METAL = []
-HOST_DARWIN = ["-D_DARWIN_C_SOURCE", "-D_XOPEN_SOURCE=700", "-Dst_mtim=st_mtimespec",
+HOST_DARWIN = ["-D_DARWIN_C_SOURCE", "-D_XOPEN_SOURCE=700", "-Dst_mtim=st_mtimespec"] + (
+    ["-Ipc/build/ios/include"] if IOS else []) + [
                "-Ipc/macos/include", "-Ipc/third_party/SDL3/src/video/khronos",
                "-include", "pc/macos/include/mac_compat.h",
                "-include", "pc/build/macos/include/mac_sections.h"] + HOST_DARWIN_METAL
@@ -242,7 +253,9 @@ def compile_metal_core(obj, command, source, out):
 
 def compile_metal_shaders(out):
     """The shaders' metallib and table (pc/tools/metal_shaders.py), the table compiled."""
-    result = subprocess.run([sys.executable, "pc/tools/metal_shaders.py", "--out", str(out / "metal")], cwd=root,
+    result = subprocess.run([sys.executable, "pc/tools/metal_shaders.py", "--out", str(out / "metal"),
+                             "--header", f"{LINUX_OUT}/vk_shaders.h",
+                             "--sdk", "iphoneos" if IOS else "macosx"], cwd=root,
                             capture_output=True, text=True)
     if result.returncode:
         return result
@@ -289,13 +302,16 @@ def compile_host(obj, command, edits, out, table, base):
         return target, cpp
     data = pre.read_bytes()
     if base and not cxx:
-        data = guest_base_tool.rewrite(data, base, target="arm64-apple-macos14.0")[0]
+        data = guest_base_tool.rewrite(data, base, target=TARGET)[0]
     pre.write_bytes(prefix.encode() + darwin_text(data, table))
     args = [compiler, "-target", TARGET, *(["-x", "c++-cpp-output"] if cxx else []), "-c", str(pre), "-o", str(target),
             *preprocessed_flags(flags), *LENIENT]
     return target, subprocess.run(args, cwd=root, capture_output=True, text=True)
 
 
+IOS_FRAMEWORKS = ["Metal", "MetalFX", "QuartzCore", "UIKit", "Foundation", "CoreAudio", "AudioToolbox", "AVFoundation",
+                  "CoreMotion", "GameController", "CoreHaptics", "CoreGraphics", "CoreVideo", "CoreMedia",
+                  "CoreBluetooth", "UniformTypeIdentifiers"]
 FRAMEWORKS = ["Metal", "MetalFX", "QuartzCore", "Cocoa", "IOKit", "CoreAudio", "AudioToolbox", "CoreVideo", "Carbon", "ForceFeedback",
               "GameController", "Metal", "QuartzCore", "CoreHaptics", "UniformTypeIdentifiers",
               "AVFoundation", "CoreMedia", "OpenGL"]
@@ -337,9 +353,11 @@ def build_sdl(out):
     library = out / "sdl3/libSDL3.a"
     if library.exists():
         return
+    platform = (["-DCMAKE_SYSTEM_NAME=iOS", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.0", "-DSDL_OPENGLES=OFF"] if IOS
+                else ["-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0"])
     subprocess.run(["cmake", "-S", "pc/third_party/SDL3", "-B", str(out / "sdl3"), "-G", "Ninja",
                     "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_ARCHITECTURES=arm64",
-                    "-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0", "-DSDL_SHARED=OFF", "-DSDL_STATIC=ON",
+                    *platform, "-DSDL_SHARED=OFF", "-DSDL_STATIC=ON",
                     "-DSDL_TESTS=OFF", "-DSDL_TEST_LIBRARY=OFF", "-DSDL_EXAMPLES=OFF", "-DSDL_INSTALL=OFF",
                     "-DSDL_CAMERA=OFF", "-DSDL_GPU=OFF", "-DSDL_RENDER_GPU=OFF", "-DSDL_VULKAN=ON",
                     "-DSDL_RENDER_VULKAN=OFF"], cwd=root, check=True, capture_output=True)
@@ -356,7 +374,7 @@ def link(manifest, out):
             seen.add(o)
             ordered.append(o)
     args = ["clang++", "-target", TARGET, "-o", str(out / "rood"), *ordered,
-            str(out / "sdl3/libSDL3.a"), *[a for f in FRAMEWORKS for a in ("-framework", f)],
+            str(out / "sdl3/libSDL3.a"), *[a for f in (IOS_FRAMEWORKS if IOS else FRAMEWORKS) for a in ("-framework", f)],
             "-liconv", "-lc++",
             # Weak references nothing defines (the engine library's hooks):
             # null at run time, as an undefined weak symbol is on ELF.
@@ -373,22 +391,30 @@ def main():
     parser.add_argument("--only", choices=["game", "host", "generated", "link"])
     parser.add_argument("--jobs", type=int, default=os.cpu_count())
     parser.add_argument("--moltenvk", action="store_true", help="Vulkan through MoltenVK (pc/build/macos-vk), not Metal")
+    parser.add_argument("--ios", action="store_true", help="for iPhone (pc/build/ios)")
     args = parser.parse_args()
-    manifest = json.loads((root / "pc/build/boot64-gb/macos_manifest.json").read_text())
-    out = root / ("pc/build/macos" if METAL else "pc/build/macos-vk")
+    manifest = json.loads((root / LINUX_OUT / "macos_manifest.json").read_text())
+    out = root / ("pc/build/ios" if IOS else "pc/build/macos" if METAL else "pc/build/macos-vk")
     out.mkdir(parents=True, exist_ok=True)
     table_path = out / "macos_sections.json"
     table = json.loads(table_path.read_text()) if table_path.exists() else {}
     section_table(manifest, table)
     (out / "include").mkdir(exist_ok=True)
     write_section_header(table, out / "include/mac_sections.h")
+    if IOS:  # the GL renderer's headers (it is never chosen on iPhone): the macOS SDK's
+        mac_sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture_output=True, text=True).stdout.strip()
+        shutil.copytree(pathlib.Path(mac_sdk) / "System/Library/Frameworks/OpenGL.framework/Headers",
+                        out / "include/OpenGL", dirs_exist_ok=True)
 
     def local(arg):
-        # The manifest's paths are the container's (/work = the repository).
+        # The manifest's paths are the container's (/work = the repository);
+        # the iPhone's build is a copy of a Linux build at its own guest base.
+        if IOS:
+            arg = arg.replace("/work/pc/build/boot64-gb/", f"{LINUX_OUT}/")
         return arg.replace("/work/", "")
 
     if args.only in ("generated", "link"):
-        linux_out = root / "pc/build/boot64-gb"
+        linux_out = root / LINUX_OUT
         for name, result in (compile_generated(linux_out, out, table, manifest)
                              + [("imports", write_imports(manifest["imports"], out))]
                              + ([("metal shaders", compile_metal_shaders(out))] if METAL else [])):

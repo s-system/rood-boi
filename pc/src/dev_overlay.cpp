@@ -2301,6 +2301,8 @@ extern "C" int pc_photo_hide_overlay(void) __attribute__((weak));
 extern "C" int pc_photo_hide_hud(void) __attribute__((weak));
 extern "C" void pc_photo_format_draw(void) __attribute__((weak));
 
+#include "touch_pad.inc" /* the touch screen's pad (iPhone) */
+
 extern "C" void pc_overlay_frame(int width, int height)
 {
     if (!active)
@@ -2426,6 +2428,8 @@ extern "C" void pc_overlay_frame(int width, int height)
         pc_fast_travel_prompt_draw(); /* the Travel prompt on a Circle of Magic (not over the editor) */
     pc_hud_panels((float)dt, pc_gl_view[2], pc_gl_view[3]); /* plugins' panels (a photo mode's card): over everything but the editor's */
     shell_text_input();
+    if (!hide_hud)
+        touch_pad_draw();
     ImGui::Render();
 #ifdef ROOD_VULKAN
     if (pc_vk_on())

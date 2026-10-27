@@ -31,6 +31,8 @@ static int fast_forward_held(void) { return focused && (fast_forward_key || pc_c
  * that still run (its effect's loading) are not presented and not paced;
  * what the audio device has no room for meanwhile is dropped
  * (audio_output.c). */
+extern void pc_touch_pad_event(const SDL_Event* event) __attribute__((weak)); /* dev_overlay.cpp (touch_pad.inc) */
+extern unsigned pc_touch_pad_buttons(void) __attribute__((weak));
 extern int pc_charge_skip_hidden(void) __attribute__((weak));
 extern int pc_take_pace(void) __attribute__((weak)); /* cutscene.cpp */
 extern void pc_audio_output_turbo(int on) __attribute__((weak)); /* audio_output.c */
@@ -165,6 +167,10 @@ void pc_window_init(int enabled, int run_fast)
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, "1");
     /* Leave the X11 compositor on, like any other window. */
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
+#ifdef ROOD_IOS
+    /* Touches drive the touch pad: no synthetic mouse clicks under them. */
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Cannot open display: %s\n", SDL_GetError());
         exit(1);
@@ -300,6 +306,8 @@ unsigned pc_window_buttons(void)
     /* Developer RPC input (dev_rpc.c) applies even while unfocused. */
     unsigned keys = buttons | (pc_camera_stick_keys && (camera_keys & 16) ? 1u << 10 : 0);
     unsigned pad = capture_filter(NULL) ? 0 : pc_controller_buttons(); /* a binding capture takes the pad */
+    if (pc_touch_pad_buttons)
+        pad |= pc_touch_pad_buttons(); /* the touch screen's pad (dev_overlay.cpp touch_pad.inc) */
     unsigned result = pc_input_buttons(focused ? keys | pad : 0, pc_rpc_buttons());
     if (&pc_photo_input_swallowed)
         result &= ~pc_photo_input_swallowed; /* the photo mode's safety took it (photo.cpp) */
@@ -397,6 +405,8 @@ void pc_window_tick(void)
             break;
         default:
             pc_controller_event(&event);
+            if (pc_touch_pad_event)
+                pc_touch_pad_event(&event);
             break;
         }
     }

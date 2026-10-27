@@ -30,6 +30,7 @@
 #include "frame_cost.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_metal.h>
+#include <TargetConditionals.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <MetalFX/MetalFX.h>
@@ -451,11 +452,14 @@ void vk_barrier(void)
 {
     pc_cost_count(PC_COUNT_BARRIERS, 1);
     /* Between encoders Metal's tracking orders the work. Inside one: */
+#if TARGET_OS_OSX /* (iOS has no render encoder barriers: render passes end before what reads them) */
     if (rec.encoder == ENC_RENDER)
         [rec.render memoryBarrierWithScope:MTLBarrierScopeTextures | MTLBarrierScopeBuffers | MTLBarrierScopeRenderTargets
                                afterStages:MTLRenderStageFragment | MTLRenderStageVertex
                               beforeStages:MTLRenderStageFragment | MTLRenderStageVertex];
-    else if (rec.encoder == ENC_COMPUTE)
+    else
+#endif
+    if (rec.encoder == ENC_COMPUTE)
         [rec.compute memoryBarrierWithScope:MTLBarrierScopeTextures | MTLBarrierScopeBuffers];
 }
 int vk_rendering_open(void) { return rendering; }
@@ -2037,7 +2041,9 @@ static VkResult create_swapchain(VkDevice d, const VkSwapchainCreateInfoKHR* inf
     sc->extent = info->imageExtent;
     sc->surface->layer.drawableSize = CGSizeMake(info->imageExtent.width, info->imageExtent.height);
     sc->surface->layer.maximumDrawableCount = (NSUInteger)(sc->count < 2 ? 2 : sc->count);
+#if TARGET_OS_OSX
     sc->surface->layer.displaySyncEnabled = info->presentMode == VK_PRESENT_MODE_FIFO_KHR;
+#endif
     for (int i = 0; i < sc->count; i++) {
         sc->images[i].format = VK_FORMAT_B8G8R8A8_UNORM;
         sc->images[i].samples = 1;
