@@ -60,7 +60,10 @@ typedef struct {
     id<MTLTexture> texture; /* a swapchain image's: the drawable's, set at each acquire */
     VkFormat format;
     int depth, samples;
+    id<MTLBuffer> backing; /* an R32_UINT storage image: the buffer it is a linear view of (image atomics) */
 } mtl_image;
+/* metal_shaders.py LINEAR_ALIGN: the row stride's alignment of images atomics reach through a buffer. */
+#define MTL_LINEAR_ALIGN 256
 typedef struct {
     mtl_image* image; /* the view shows the whole image (vk_core.c makes no other) */
 } mtl_view;
@@ -183,6 +186,7 @@ typedef struct {
     VkDeviceSize offset; /* buffers */
     int set;
     NSArray* bottoms;  /* a TLAS's BLASes: declared with it */
+    id<MTLBuffer> backing; /* a storage image's buffer (MTL_ARG_ATOMIC) */
 } binding_slot;
 typedef struct {
     mtl_pipeline* pipeline;
@@ -758,7 +762,17 @@ static int make_image(vk_image* image, MTLTextureDescriptor* desc, VkFormat form
         desc.usage |= MTLTextureUsageRenderTarget; /* (transfer destinations: clears and blits draw) */
     if (usage & VK_IMAGE_USAGE_STORAGE_BIT)
         desc.usage |= MTLTextureUsageShaderWrite;
-    id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+    id<MTLBuffer> backing = nil;
+    id<MTLTexture> texture;
+    if (format == VK_FORMAT_R32_UINT && (usage & VK_IMAGE_USAGE_STORAGE_BIT) && desc.textureType == MTLTextureType2D) {
+        /* SPIRV-Cross's image atomics (atomic_uint over the image's memory): a linear texture on a buffer. */
+        NSUInteger row = (desc.width * 4 + MTL_LINEAR_ALIGN - 1) & ~(NSUInteger)(MTL_LINEAR_ALIGN - 1);
+        backing = [device newBufferWithLength:row * desc.height options:MTLResourceStorageModePrivate];
+        desc.storageMode = MTLStorageModePrivate;
+        desc.usage &= ~MTLTextureUsageRenderTarget;
+        texture = [backing newTextureWithDescriptor:desc offset:0 bytesPerRow:row];
+    } else
+        texture = [device newTextureWithDescriptor:desc];
     if (!texture) {
         fprintf(stderr, "[mtl] cannot make a %dx%d texture (VkFormat %d)\n", (int)desc.width, (int)desc.height,
             (int)format);
@@ -766,6 +780,7 @@ static int make_image(vk_image* image, MTLTextureDescriptor* desc, VkFormat form
     }
     mtl_image* m = calloc(1, sizeof *m);
     m->texture = texture;
+    m->backing = backing;
     m->format = format;
     m->depth = depth;
     m->samples = samples;
@@ -815,6 +830,7 @@ static void destroy_view(mtl_view* v) { free(v); }
 static void destroy_image(mtl_image* m)
 {
     [m->texture release];
+    [m->backing release];
     free(m);
 }
 void vk_image_destroy(vk_image* image)
@@ -1006,6 +1022,13 @@ static void clear_in_scope(const VkClearAttachment* a, int count, const VkClearR
 /* A whole image cleared outside any scope (vk_image_create, vkCmdClearColorImage). */
 static void clear_texture_value(mtl_image* m, const VkClearColorValue* color, float depth)
 {
+    if (m->backing) { /* a linear view of a buffer: fill the buffer (a byte pattern: 0 and ~0 are) */
+        uint32_t v = color->uint32[0];
+        if ((v & 0xff) * 0x01010101u != v)
+            fprintf(stderr, "[mtl] clearing an atomic image to %08x: filled with its low byte\n", v);
+        [blit_encoder() fillBuffer:m->backing range:NSMakeRange(0, m->backing.length) value:(uint8_t)v];
+        return;
+    }
     if (!(m->texture.usage & MTLTextureUsageRenderTarget) || m->texture.textureType == MTLTextureType3D)
         return;
     if (rendering)
@@ -1170,6 +1193,18 @@ VkShaderModule vk_shader(const uint32_t* code, size_t bytes)
             mtl_module* m = calloc(1, sizeof *m);
             m->info = &mtl_shaders[i];
             m->function = [library newFunctionWithName:@(mtl_shaders[i].function)];
+            if (m->function && m->function.functionConstantsDictionary.count) {
+                /* SPIRV-Cross's optional constants (spvLinearTextureAlignmentOverride): unset, the defaults. */
+                NSError* error = nil;
+                MTLFunctionConstantValues* none = [[MTLFunctionConstantValues new] autorelease];
+                id<MTLFunction> specialized = [library newFunctionWithName:@(mtl_shaders[i].function)
+                                                            constantValues:none
+                                                                     error:&error];
+                [m->function release];
+                m->function = specialized;
+                if (!specialized)
+                    fprintf(stderr, "[mtl] %s: %s\n", mtl_shaders[i].function, error.localizedDescription.UTF8String);
+            }
             if (!m->function) {
                 fprintf(stderr, "[mtl] %s is not in rood.metallib\n", mtl_shaders[i].function);
                 free(m);
@@ -1383,6 +1418,7 @@ static void push_descriptor_set(VkCommandBuffer cmd, VkPipelineBindPoint point, 
     for (int i = 0; i < 32; i++) {
         [bp->slots[i].resource release];
         [bp->slots[i].bottoms release];
+        [bp->slots[i].backing release];
         bp->slots[i] = (binding_slot){ 0 };
     }
     /* Combined image samplers: the texture at the binding's texture id, the
@@ -1406,6 +1442,7 @@ static void push_descriptor_set(VkCommandBuffer cmd, VkPipelineBindPoint point, 
         case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: {
             mtl_view* v = (mtl_view*)w->pImageInfo->imageView;
             s->resource = v ? [v->image->texture retain] : nil;
+            s->backing = v ? [v->image->backing retain] : nil;
             if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && w->pImageInfo->sampler)
                 combined_samplers[which][w->dstBinding] = [((mtl_sampler*)w->pImageInfo->sampler)->state retain];
             break;
@@ -1473,6 +1510,12 @@ static vk_slice arguments_for(const mtl_shader_info* info, int compute, id encod
             id<MTLBuffer> b = resource;
             words[a->id] = b.gpuAddress + s->offset;
             used = b;
+        } else if (a->kind == MTL_ARG_ATOMIC) {
+            if (!s->backing)
+                continue;
+            words[a->id] = s->backing.gpuAddress;
+            used = s->backing;
+            usage = MTLResourceUsageRead | MTLResourceUsageWrite;
         } else if (a->kind == MTL_ARG_STRUCTURE) {
             id<MTLAccelerationStructure> st = resource;
             MTLResourceID rid = st.gpuResourceID;

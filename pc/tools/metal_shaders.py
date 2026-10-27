@@ -40,6 +40,7 @@ KINDS = {"texture": 1, "sampler": 2, "buffer": 3, "structure": 4, "atomic": 5}
 # Helpers SPIRV-Cross defines as plain (not inline) functions: one copy per
 # module would collide in the metallib, so each module gets its own name.
 SHARED_HELPERS = ["spvMakeIntersectionParams"]
+LINEAR_ALIGN = 256  # mtl_core.m MTL_LINEAR_ALIGN
 
 
 def read_header(path):
@@ -107,6 +108,9 @@ def translate(name, stage, words, work, sdk):
             .replace("vertex", "vert").replace("fragment", "frag"), str(spv)]
     if stage == "vert":
         args.append("--flip-vert-y")
+    # Image atomics (R32_UINT storage images) go through a buffer the image is
+    # a linear view of, rows LINEAR_ALIGN bytes apart (mtl_core.m makes them so).
+    args += ["--msl-r32ui-linear-texture-align", str(LINEAR_ALIGN)]
     if sdk == "iphoneos":
         args.append("--msl-ios")
     result = subprocess.run(args, capture_output=True, text=True)
