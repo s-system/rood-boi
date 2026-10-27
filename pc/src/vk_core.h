@@ -163,6 +163,7 @@ typedef struct {
     VkPhysicalDeviceMemoryProperties memory;
     uint32_t api_version;
     int ray_query; /* VK_KHR_ray_query + acceleration structures enabled */
+    int geometry_shader; /* geometryShader enabled (else native_pull.vert) */
     VkFormat depth_format; /* X8_D24 when it can be sampled and attached, else D32_SFLOAT */
     VkSampler nearest, linear; /* clamp to edge */
     int frame; /* slot of the frame being recorded (0..VK_FRAMES-1) */

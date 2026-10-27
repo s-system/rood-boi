@@ -479,12 +479,18 @@ int vk_core_init(const char* const* instance_extensions, uint32_t extension_coun
     const char* layers[1] = { "VK_LAYER_KHRONOS_validation" };
     if (validation && has_extension(available, available_count, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
         extensions[count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    /* MoltenVK (macOS, iOS) is a portability implementation: the loader
+     * lists it only to an instance that enumerates those. */
+    int portability = has_extension(available, available_count, "VK_KHR_portability_enumeration");
+    if (portability)
+        extensions[count++] = "VK_KHR_portability_enumeration";
     free(available);
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "rood-boi",
         .pEngineName = "rood-boi",
         .apiVersion = VK_API_VERSION_1_3 };
     VkInstanceCreateInfo create = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .flags = portability ? 0x00000001 /* VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR */ : 0,
         .pApplicationInfo = &app,
         .enabledExtensionCount = count,
         .ppEnabledExtensionNames = extensions,
@@ -585,6 +591,9 @@ int vk_core_init(const char* const* instance_extensions, uint32_t extension_coun
     enable[enable_count++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
     if (has_extension(device_extensions, device_extension_count, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
         enable[enable_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    /* A portability implementation (MoltenVK) requires its subset enabled. */
+    if (has_extension(device_extensions, device_extension_count, "VK_KHR_portability_subset"))
+        enable[enable_count++] = "VK_KHR_portability_subset";
     const char* rt = getenv("ROOD_VK_RT");
     int want_rt = !(rt && *rt == '0');
     int ray_query = want_rt && has_extension(device_extensions, device_extension_count, VK_KHR_RAY_QUERY_EXTENSION_NAME)
@@ -620,12 +629,17 @@ int vk_core_init(const char* const* instance_extensions, uint32_t extension_coun
     VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &f13 };
     VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f12 };
     vkGetPhysicalDeviceFeatures2(vk.gpu, &features);
-    if (!f13.dynamicRendering || !f13.synchronization2 || !features.features.geometryShader
-        || !features.features.independentBlend) {
-        fprintf(stderr, "[vk] %s lacks dynamic rendering, synchronization2, geometry shaders or independent blend\n",
+    if (!f13.dynamicRendering || !f13.synchronization2 || !features.features.independentBlend) {
+        fprintf(stderr, "[vk] %s lacks dynamic rendering, synchronization2 or independent blend\n",
             vk.properties.deviceName);
         return 0;
     }
+    /* Without geometry shaders (MoltenVK: Metal has none) the native lists
+     * run their polygon stage in the vertex shader (native_pull.vert). */
+    vk.geometry_shader = features.features.geometryShader;
+    if (!vk.geometry_shader)
+        fprintf(stderr, "[vk] %s has no geometry shaders: native lists pull their polygons\n",
+            vk.properties.deviceName);
     ray_query = ray_query && rq.rayQuery && as.accelerationStructure && f12.bufferDeviceAddress;
     VkPhysicalDeviceRayQueryFeaturesKHR rq_on = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
         .rayQuery = VK_TRUE };
@@ -645,7 +659,7 @@ int vk_core_init(const char* const* instance_extensions, uint32_t extension_coun
         .scalarBlockLayout = f12.scalarBlockLayout,
         .hostQueryReset = f12.hostQueryReset };
     VkPhysicalDeviceFeatures2 on = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &on12 };
-    on.features.geometryShader = VK_TRUE;
+    on.features.geometryShader = features.features.geometryShader;
     on.features.independentBlend = VK_TRUE;
     on.features.fragmentStoresAndAtomics = features.features.fragmentStoresAndAtomics;
     on.features.shaderInt64 = features.features.shaderInt64;

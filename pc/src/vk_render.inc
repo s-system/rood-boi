@@ -153,6 +153,14 @@ static int vk_mesh_bind(uint32_t mesh)
     vkCmdBindVertexBuffers(vk_cmd(), 0, 1, &vk_blocks[e->block].buffer.buffer, &e->offset);
     return 1;
 }
+/* The mesh's vertices as a storage buffer (native_pull.vert reads them;
+ * blocks hand out 256-byte aligned ranges). */
+static const vk_mesh_entry* vk_mesh_entry_of(uint32_t mesh)
+{
+    if (!mesh || (int)mesh > vk_mesh_count || vk_meshes[mesh - 1].block < 0)
+        return NULL;
+    return &vk_meshes[mesh - 1];
+}
 
 /* ---- pipelines ---- */
 
@@ -196,10 +204,14 @@ static VkPipelineLayout vk_native_layout;
  * vk_native_ms_samples (MSAA, antialias.h; made when first needed). */
 static VkPipeline vk_native_opaque[2], vk_native_depth_only[2], vk_native_blend[2][4];
 static int vk_native_ready = -1, vk_native_ms_samples;
+/* No geometry stage (vk.geometry_shader 0, or ROOD_VK_PULL=1 to test it on a
+ * device that has one): six vertices a polygon through native_pull.vert. */
+static int vk_native_pull;
 static int vk_native_pipelines(int set, int samples)
 {
-    VkShaderModule vs = vk_shader(vk_spv_native_vert, vk_spv_native_vert_size),
-                   gs = vk_shader(vk_spv_native_geom, vk_spv_native_geom_size),
+    VkShaderModule vs = vk_native_pull ? vk_shader(vk_spv_native_pull_vert, vk_spv_native_pull_vert_size)
+                                       : vk_shader(vk_spv_native_vert, vk_spv_native_vert_size),
+                   gs = vk_native_pull ? VK_NULL_HANDLE : vk_shader(vk_spv_native_geom, vk_spv_native_geom_size),
                    fs = set ? vk_shader(vk_spv_native_ms_frag, vk_spv_native_ms_frag_size) /* surfaces multisampled */
                             : vk_shader(vk_spv_native_frag, vk_spv_native_frag_size);
     static const VkVertexInputBindingDescription binding = { 0, sizeof(mesh_vertex), VK_VERTEX_INPUT_RATE_VERTEX };
@@ -219,10 +231,10 @@ static int vk_native_pipelines(int set, int samples)
         .geometry = gs,
         .fragment = fs,
         .layout = vk_native_layout,
-        .topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY,
-        .binding = &binding,
-        .attributes = attributes,
-        .attribute_count = 8,
+        .topology = vk_native_pull ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY,
+        .binding = vk_native_pull ? NULL : &binding,
+        .attributes = vk_native_pull ? NULL : attributes,
+        .attribute_count = vk_native_pull ? 0 : 8,
         .color_count = 5,
         .color_formats = formats,
         .depth_format = vk.depth_format,
@@ -238,7 +250,8 @@ static int vk_native_pipelines(int set, int samples)
         vk_native_blend[set][m] = vk_pipeline(&d);
     }
     vkDestroyShaderModule(vk.device, vs, NULL);
-    vkDestroyShaderModule(vk.device, gs, NULL);
+    if (gs)
+        vkDestroyShaderModule(vk.device, gs, NULL);
     vkDestroyShaderModule(vk.device, fs, NULL);
     return vk_native_opaque[set] && vk_native_depth_only[set] && vk_native_blend[set][0] && vk_native_blend[set][1]
         && vk_native_blend[set][2] && vk_native_blend[set][3];
@@ -248,11 +261,17 @@ static int vk_native_init(void)
     if (vk_native_ready >= 0)
         return vk_native_ready;
     vk_native_ready = 0;
-    VkDescriptorType types[7] = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    const char* pull = getenv("ROOD_VK_PULL");
+    vk_native_pull = !vk.geometry_shader || (pull && *pull == '1');
+    if (vk_native_pull)
+        fprintf(stderr, "[vk] native lists: polygons pulled in the vertex stage (native_pull.vert)\n");
+    /* 7, 8: native_pull.vert's vertices and polygon order */
+    VkDescriptorType types[9] = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER };
-    vk_native_set = vk_push_layout(types, 7);
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER };
+    vk_native_set = vk_push_layout(types, vk_native_pull ? 9 : 7);
     VkPipelineLayoutCreateInfo layout = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
         .pSetLayouts = &vk_native_set };
@@ -288,7 +307,26 @@ typedef struct {
     VkImageView surface_depth, surface_before;
     VkDeviceSize ubo_alignment, ssbo_alignment;
     vk_slice uv_effects; /* the list's animated materials (uv_effect_table) */
+    vk_slice order; /* the indexed draws' polygon order (native_pull.vert reads it) */
 } vk_draw_state;
+
+/* The native list draws, with or without the geometry stage: `polygons`
+ * in mesh order, or `count` polygons of the bound order from polygon
+ * `first` (native_pull.vert: gl_InstanceIndex = first + 1). */
+static void vk_native_draw(VkCommandBuffer cmd, int polygons)
+{
+    if (vk_native_pull)
+        vkCmdDraw(cmd, (uint32_t)polygons * 6, 1, 0, 0);
+    else
+        vkCmdDraw(cmd, (uint32_t)polygons * 4, 1, 0, 0);
+}
+static void vk_native_draw_order(VkCommandBuffer cmd, int count, int first)
+{
+    if (vk_native_pull)
+        vkCmdDraw(cmd, (uint32_t)count * 6, 1, (uint32_t)first * 6, (uint32_t)first + 1);
+    else
+        vkCmdDrawIndexed(cmd, (uint32_t)count * 4, 1, (uint32_t)first * 4, 0, 0);
+}
 
 /* Model -> view for each palette entry (camera * world) into a storage
  * slice; the room's normal matrix from entry 0 (as upload_palette). */
@@ -377,6 +415,14 @@ static mesh_slot* vk_use_instance(vk_draw_state* s, const draw_list* list, const
     vk_descriptors_buffer(&d, 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, s->uv_effects.buffer, s->uv_effects.offset,
         (VkDeviceSize)(s->ubo.uv_count > 0 ? s->ubo.uv_count : 1) * sizeof(uv_effect_gpu));
     vk_descriptors_image(&d, 6, vk_hw.emissive.view, vk.nearest);
+    if (vk_native_pull) {
+        const vk_mesh_entry* e = vk_mesh_entry_of(mesh->vbo);
+        vk_descriptors_buffer(&d, 7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, vk_blocks[e->block].buffer.buffer, e->offset,
+            e->size);
+        /* no order bound: any buffer (the draws in mesh order never read it) */
+        vk_descriptors_buffer(&d, 8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, s->order.data ? s->order.buffer : ubo.buffer,
+            s->order.data ? s->order.offset : ubo.offset, s->order.data ? VK_WHOLE_SIZE : sizeof *u);
+    }
     vk_descriptors_push(&d, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_native_layout);
     return mesh;
 }
@@ -448,14 +494,16 @@ static void vk_draw_instances(vk_draw_state* s, const draw_list* list, const ren
             s->ubo.order = base | shift << 24;
             mesh_slot* mesh = vk_use_instance(s, list, &list->instances[i], target, cam, pass, interpolated);
             if (mesh) {
-                vkCmdDraw(cmd, (uint32_t)mesh->polygons * 4, 1, 0, 0);
+                vk_native_draw(cmd, mesh->polygons);
                 base += mesh->polygons;
             }
         }
     } else {
         /* PS1 order: each polygon paints over the ones before it; only the
          * surfaces from before the list hide it. */
-        vk_slice indices = vk_arena((VkDeviceSize)list->order_used * 4 * sizeof(uint32_t), 16);
+        vk_slice indices = vk_arena((VkDeviceSize)list->order_used * 4 * sizeof(uint32_t),
+            s->ssbo_alignment > 16 ? s->ssbo_alignment : 16);
+        s->order = indices;
         if (!indices.data)
             return;
         uint32_t* index = indices.data;
@@ -479,7 +527,7 @@ static void vk_draw_instances(vk_draw_state* s, const draw_list* list, const ren
                 for (int q = k; valid && q < run; q++)
                     valid = (int)(list->order[q] & 0xffff) < mesh->polygons;
                 if (valid)
-                    vkCmdDrawIndexed(cmd, (uint32_t)(run - k) * 4, 1, (uint32_t)k * 4, 0, 0);
+                    vk_native_draw_order(cmd, run - k, k);
             }
             k = run;
         }
@@ -657,7 +705,8 @@ static int vk_draw_translucent(uint32_t id, int first, int count, const render_t
     const vk_image* surface = vk_hw_depth(target->surface_depth);
     if (!a || !surface)
         return -1;
-    vk_slice indices = vk_arena((VkDeviceSize)count * 4 * sizeof(uint32_t), 16);
+    VkDeviceSize order_alignment = vk.properties.limits.minStorageBufferOffsetAlignment;
+    vk_slice indices = vk_arena((VkDeviceSize)count * 4 * sizeof(uint32_t), order_alignment > 16 ? order_alignment : 16);
     if (!indices.data)
         return -1;
     const uint32_t* entries = list->translucent + first;
@@ -678,6 +727,7 @@ static int vk_draw_translucent(uint32_t id, int first, int count, const render_t
         return 0;
     VkCommandBuffer cmd = vk_cmd();
     vkCmdBindIndexBuffer(cmd, indices.buffer, indices.offset, VK_INDEX_TYPE_UINT32);
+    s.order = indices; /* after vk_begin_draw, which clears s */
     s.surface_depth = surface->view;
     int effects = list->rules.effects;
     s.ubo.translucent = effects ? 2 : 1;
@@ -718,14 +768,14 @@ static int vk_draw_translucent(uint32_t id, int first, int count, const render_t
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_native_opaque[set]);
         vk_depth_state(1, VK_COMPARE_OP_ALWAYS, 1);
         if (vk_use_instance(&s, list, in, target, cam, 0, &interpolated))
-            vkCmdDrawIndexed(cmd, (uint32_t)(run - k) * 4, 1, (uint32_t)k * 4, 0, 0);
+            vk_native_draw_order(cmd, run - k, k);
         /* ...then the semi-transparent ones blended, keeping the depth and
          * the surface behind them. */
         s.ubo.semi_pass = 2;
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_native_blend[set][mode & 3]);
         vk_depth_state(1, VK_COMPARE_OP_ALWAYS, 0);
         if (vk_use_instance(&s, list, in, target, cam, 1, &interpolated))
-            vkCmdDrawIndexed(cmd, (uint32_t)(run - k) * 4, 1, (uint32_t)k * 4, 0, 0);
+            vk_native_draw_order(cmd, run - k, k);
         drawn += run - k;
         k = run;
     }
