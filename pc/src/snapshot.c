@@ -309,6 +309,18 @@ static uintptr_t read_canary(void)
 static void write_canary(uintptr_t v) { __asm__ volatile("movl %0, %%gs:0x14" : : "r"(v) : "memory"); }
 #endif
 
+/* Whether the boundary's record is this vsync's: on x86 its return address is
+ * still on the stack at sp; AArch64 keeps it in lr (saved in the record), so
+ * the stack has nothing to check it against. */
+static int boundary_live(uintptr_t sp)
+{
+#ifdef __aarch64__
+    (void)sp;
+    return CTX_IP(&pc_snap_boundary) != 0;
+#else
+    return *(uintptr_t*)sp == CTX_IP(&pc_snap_boundary);
+#endif
+}
 /* Call fn with the stack pointer at `top` (aligned down); fn does not return
  * (state_rewind.c's restore and the in-process load run there). */
 __attribute__((noreturn)) void pc_snap_call_on_stack(void* top, void (*fn)(void));
@@ -354,6 +366,8 @@ static const char* text_range(size_t* size)
     *size = 0;
     return __ImageBase;
 }
+/* Not moved between processes yet: a snapshot resumes in the same build only. */
+static void image_range(uintptr_t* start, uintptr_t* end) { *start = *end = 0; }
 #else
 extern char __start_rood_state_data[] __attribute__((weak)), __stop_rood_state_data[] __attribute__((weak));
 extern char __start_rood_state_bss[] __attribute__((weak)), __stop_rood_state_bss[] __attribute__((weak));
@@ -388,6 +402,61 @@ static void image_range(uintptr_t* start, uintptr_t* end)
     *start = base;
     *end = top - text_vmaddr + base;
 }
+/* Whether `offset` (from the image's start) is a function's first
+ * instruction, from LC_FUNCTION_STARTS. Guest memory holds the code
+ * addresses the host stores there (callback tables in the game's heap)
+ * among plain data: a word is moved, or hashed as code, only when it is
+ * one, not merely when it falls in __text (texture bytes can). */
+static int offset_compare(const void* a, const void* b)
+{
+    uint32_t x = *(const uint32_t*)a, y = *(const uint32_t*)b;
+    return x < y ? -1 : x > y;
+}
+static int function_start(uintptr_t offset)
+{
+    static uint32_t* starts;
+    static size_t count;
+    if (!starts) {
+        const struct mach_header_64* h = &_mh_execute_header;
+        const struct load_command* lc = (const struct load_command*)(h + 1);
+        const struct linkedit_data_command* fs = NULL;
+        intptr_t slide = 0;
+        uintptr_t linkedit = 0;
+        for (uint32_t i = 0; i < h->ncmds; i++, lc = (const struct load_command*)((const char*)lc + lc->cmdsize)) {
+            if (lc->cmd == LC_FUNCTION_STARTS)
+                fs = (const struct linkedit_data_command*)lc;
+            if (lc->cmd != LC_SEGMENT_64)
+                continue;
+            const struct segment_command_64* seg = (const struct segment_command_64*)lc;
+            if (!strcmp(seg->segname, "__TEXT"))
+                slide = (intptr_t)((uintptr_t)h - seg->vmaddr);
+            if (!strcmp(seg->segname, "__LINKEDIT"))
+                linkedit = seg->vmaddr - seg->fileoff;
+        }
+        size_t capacity = 1;
+        starts = malloc(capacity * sizeof *starts);
+        if (fs && linkedit) {
+            const uint8_t* q = (const uint8_t*)(linkedit + slide + fs->dataoff);
+            const uint8_t* q_end = q + fs->datasize;
+            uint64_t at = 0;
+            while (q < q_end) {
+                uint64_t delta = 0;
+                int shift = 0;
+                do
+                    delta |= (uint64_t)(*q & 0x7f) << shift, shift += 7;
+                while (*q++ & 0x80 && q < q_end);
+                if (!delta)
+                    break;
+                at += delta;
+                if (count == capacity)
+                    starts = realloc(starts, (capacity *= 2) * sizeof *starts);
+                starts[count++] = (uint32_t)at; /* from __TEXT's vmaddr: the image's start */
+            }
+        }
+    }
+    uint32_t key = (uint32_t)offset;
+    return offset == key && bsearch(&key, starts, count, sizeof *starts, offset_compare) != NULL;
+}
 #else
 extern char __executable_start[], etext[];
 static const char* text_range(size_t* size)
@@ -398,6 +467,9 @@ static const char* text_range(size_t* size)
 /* A fixed (non-PIE) image: nothing moves between processes. */
 static void image_range(uintptr_t* start, uintptr_t* end) { *start = *end = 0; }
 #endif
+#endif
+#ifndef __APPLE__
+static int function_start(uintptr_t offset) { (void)offset; return 1; }
 #endif
 /* snapshot_key.c (build_boot.py, 64 bits): the game's code and state layout. */
 extern const unsigned long long pc_snapshot_code_key __attribute__((weak));
@@ -670,7 +742,7 @@ __attribute__((noinline)) int pc_snapshot_point(const char* path, char* error, i
         return -1;
     }
     uintptr_t sp = CTX_SP(&pc_snap_boundary), here = (uintptr_t)__builtin_frame_address(0);
-    if (!sp || here >= sp || *(uintptr_t*)sp != CTX_IP(&pc_snap_boundary)) {
+    if (!sp || here >= sp || !boundary_live(sp)) {
         snprintf(error, (size_t)size, "not inside a vsync of the game (pc_tick through pc_vsync_boundary)");
         return -1;
     }
@@ -882,9 +954,29 @@ static void move_words(const prepared* p, void* data, size_t size)
 {
     if (!p->slide)
         return;
+    /* Native VRAM (a state static) is pixels: some could read as an address. */
+    uintptr_t vram = (uintptr_t)pc_native_vram(), vram_end = vram + 1024 * 512 * 2;
     uintptr_t* w = data;
     for (size_t i = 0; i < size / sizeof *w; i++)
-        w[i] = moved(p, w[i]);
+        if ((uintptr_t)&w[i] < vram || (uintptr_t)&w[i] >= vram_end)
+            w[i] = moved(p, w[i]);
+}
+/* Guest memory holds native code addresses too (tables of callbacks the
+ * game allocates on its heap, 8 bytes an entry): aligned words that pointed
+ * into the saved image's code, and only there, since guest data is 32-bit
+ * words that could look like other addresses. */
+static void move_code_words(const prepared* p, void* data, size_t size)
+{
+    if (!p->slide)
+        return;
+    size_t text_size;
+    uintptr_t text = (uintptr_t)text_range(&text_size), image_start, image_end;
+    image_range(&image_start, &image_end);
+    uintptr_t old_text = text - image_start + (uintptr_t)p->h.image_start;
+    uintptr_t* w = data;
+    for (size_t i = 0; i < size / sizeof *w; i++)
+        if (w[i] >= old_text && w[i] < old_text + text_size && function_start(w[i] - (uintptr_t)p->h.image_start))
+            w[i] += (uintptr_t)p->slide;
 }
 
 static void discard(prepared* p)
@@ -976,6 +1068,8 @@ static char* apply(prepared* p, const char* path, int replay_log, size_t* stack_
             if (p->slide && (uintptr_t)c->address - (uintptr_t)p->slide >= p->h.image_start
                 && (uintptr_t)c->address - (uintptr_t)p->slide < p->h.image_end)
                 move_words(p, (void*)(uintptr_t)c->address, (size_t)c->size);
+            else
+                move_code_words(p, (void*)(uintptr_t)c->address, (size_t)c->size);
         } else if (c->tag == CHUNK_SPU) {
             if (!pc_spu_state_load || !pc_spu_state_load(data, (int)c->size)) {
                 fprintf(stderr, "[snapshot] cannot resume %s: the SPU state does not fit\n", path);
@@ -1084,7 +1178,7 @@ __attribute__((noinline)) int pc_snapshot_load_now(const char* path, char* error
         return -1;
     }
     uintptr_t sp = CTX_SP(&pc_snap_boundary), here = (uintptr_t)__builtin_frame_address(0);
-    if (!sp || here >= sp || *(uintptr_t*)sp != CTX_IP(&pc_snap_boundary)) {
+    if (!sp || here >= sp || !boundary_live(sp)) {
         snprintf(error, (size_t)size, "not inside a vsync of the game (pc_tick through pc_vsync_boundary)");
         return -1;
     }
@@ -1105,6 +1199,32 @@ __attribute__((noinline)) int pc_snapshot_load_now(const char* path, char* error
 
 /* RPC snapshot {action: "hash"}: FNV-1a hashes of what a snapshot holds
  * (guest memory, native game statics, overlays, VRAM), for comparisons. */
+/* fnv of native memory as an offset from the image where a word points into
+ * it (code only, for guest memory): equal in every launch, whatever ASLR
+ * did. A fixed image (start 0) hashes the bytes. */
+static uint64_t fnv_image(const char* data, size_t size, uint64_t h, int code_only)
+{
+    uintptr_t start, end, vram = (uintptr_t)pc_native_vram();
+    image_range(&start, &end);
+    uintptr_t image_start = start;
+    if (!start)
+        return fnv(data, size, h);
+    if (code_only) {
+        size_t text_size;
+        start = (uintptr_t)text_range(&text_size);
+        end = start + text_size;
+    }
+    size_t i = 0;
+    for (; i + sizeof(uintptr_t) <= size; i += sizeof(uintptr_t)) {
+        uintptr_t w;
+        memcpy(&w, data + i, sizeof w);
+        int pixels = (uintptr_t)(data + i) >= vram && (uintptr_t)(data + i) < vram + 1024 * 512 * 2;
+        if (!pixels && w >= start && w < end && (!code_only || function_start(w - image_start)))
+            w -= start;
+        h = fnv(&w, sizeof w, h);
+    }
+    return fnv(data + i, size - i, h);
+}
 int pc_snapshot_hash(char* out, int size)
 {
     range r[MAX_RANGES];
@@ -1112,15 +1232,15 @@ int pc_snapshot_hash(char* out, int size)
     uint64_t state = FNV0, overlays = FNV0;
     for (int i = 3; i < n; i++) {
         if (r[i].name[0] == 's') /* state_data, state_bss */
-            state = fnv(r[i].start, r[i].size, state);
+            state = fnv_image(r[i].start, r[i].size, state, 0);
         else
-            overlays = fnv(r[i].start, r[i].size, overlays);
+            overlays = fnv_image(r[i].start, r[i].size, overlays, 0);
     }
     return snprintf(out, (size_t)size,
         "{\"ram\":\"%016llx\",\"scratch\":\"%016llx\",\"io\":\"%016llx\",\"state\":\"%016llx\","
         "\"overlays\":\"%016llx\",\"vram\":\"%016llx\",\"vsync\":%u,\"code_key\":\"%016llx\","
         "\"layout_key\":\"%016llx\"}",
-        (unsigned long long)fnv(r[0].start, r[0].size, FNV0), (unsigned long long)fnv(r[1].start, r[1].size, FNV0),
+        (unsigned long long)fnv_image(r[0].start, r[0].size, FNV0, 1), (unsigned long long)fnv(r[1].start, r[1].size, FNV0),
         (unsigned long long)fnv(r[2].start, r[2].size, FNV0), (unsigned long long)state,
         (unsigned long long)overlays, (unsigned long long)fnv(pc_native_vram(), 1024 * 512 * 2, FNV0),
         pc_vsync_count(), (unsigned long long)code_key(), (unsigned long long)layout_key());

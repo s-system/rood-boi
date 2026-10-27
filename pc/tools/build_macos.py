@@ -268,7 +268,7 @@ FRAMEWORKS = ["Cocoa", "IOKit", "CoreAudio", "AudioToolbox", "CoreVideo", "Carbo
               "AVFoundation", "CoreMedia", "OpenGL"]
 
 
-def compile_generated(linux_out, out, table):
+def compile_generated(linux_out, out, table, manifest=None):
     """The objects build_boot.py generates without a recorded command:
     native_imports (LP64 pointer tables, aliases as Mach-O assignments),
     overlay_statics_table (section bounds through mac_sections.h) and the
@@ -280,7 +280,10 @@ def compile_generated(linux_out, out, table):
     for name, text in [("native_imports", text),
                        ("overlay_statics_table", (linux_out / "overlay_statics_table.c").read_text())]:
         source = out / f"{name}.mac.c"
-        source.write_bytes(darwin_text(text.encode(), table))
+        # Their ELF section renames (game state: save states copy it).
+        edits = (manifest or {}).get("edits", {}).get(f"/work/pc/build/boot64-gb/{name}.o", [])
+        prefix = pragma(edits_of(edits)[1], table).encode()
+        source.write_bytes(prefix + darwin_text(text.encode(), table))
         results.append((name, subprocess.run(
             ["clang", "-target", TARGET, "-O2", "-fno-common", "-c", str(source), "-o", str(out / f"{name}.o"),
              "-include", "pc/build/macos/include/mac_sections.h", *LENIENT],
@@ -352,7 +355,7 @@ def main():
 
     if args.only in ("generated", "link"):
         linux_out = root / "pc/build/boot64-gb"
-        for name, result in compile_generated(linux_out, out, table) + [("imports", write_imports(manifest["imports"], out))]:
+        for name, result in compile_generated(linux_out, out, table, manifest) + [("imports", write_imports(manifest["imports"], out))]:
             print(f"{name}: {'ok' if not result.returncode else result.stderr[-3000:]}")
         if args.only == "link":
             result = link(manifest, out)

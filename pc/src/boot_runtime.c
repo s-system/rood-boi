@@ -362,6 +362,12 @@ static void pc_crash_at(int sig, siginfo_t* info, void* context)
     char line[64];
     int len = snprintf(line, sizeof line, "[crash] fault address %p\n", info->si_addr);
     write(2, line, len);
+#ifdef __APPLE__
+    /* ASLR: where the image is, to resolve [stack] (atos -l). */
+    extern const void* _dyld_get_image_header(uint32_t index); /* <mach-o/dyld.h> */
+    len = snprintf(line, sizeof line, "[crash] image at %p\n", _dyld_get_image_header(0));
+    write(2, line, len);
+#endif
     pc_crash(sig);
 }
 #endif
@@ -650,6 +656,7 @@ int main(int argc, char** argv)
 #else
     struct sigaction fault = { .sa_sigaction = pc_crash_at, .sa_flags = SA_SIGINFO };
     sigaction(SIGSEGV, &fault, NULL);
+    sigaction(SIGBUS, &fault, NULL);
 #endif
     signal(SIGFPE, pc_crash);
     signal(SIGILL, pc_crash);
