@@ -178,21 +178,30 @@ void PadInitDirect(unsigned char* a, unsigned char* b)
     a[0] = b[0] = 0xff;
 }
 void PadStartCom(void) { }
+/* Port 1 is a DualShock in digital mode: its id 4 (the game reads the
+ * buttons as from a digital pad) and its extended id 7, so the game drives
+ * its motors (PadSetAct): the small motor on/off in act[0], the large one's
+ * strength 0-255 in act[1], rewritten by the game as it plays. They go to the
+ * gamepad's rumble or the phone's haptics (boot_gamepad.c pc_pad_motors). */
 int PadInfoMode(int port, int info, int index)
 {
     (void)index;
-    return port == 0 && pc_window_enabled && info == InfoModeCurID ? 4 : 0;
+    if (port != 0 || !pc_window_enabled)
+        return 0;
+    return info == InfoModeCurID ? 4 : info == InfoModeCurExID ? 7 : 0;
 }
+static unsigned char* pad_act; /* the game's motor bytes (port 1), read each poll */
 int PadGetState(int port)
 {
     return port == 0 && pc_window_enabled ? PadStateStable : PadStateDiscon;
 }
 void PadSetAct(int port, unsigned char* data, int size)
 {
-    (void)port;
-    (void)data;
-    (void)size;
+    if (port == 0 && size >= 2)
+        pad_act = data;
 }
+/* The motors as the game last set them: small (0 off, else on) | large (0-255) << 8. */
+unsigned pc_pad_motors(void) { return pad_act ? (pad_act[0] ? 1u : 0u) | (unsigned)pad_act[1] << 8 : 0; }
 int PadSetActAlign(int port, unsigned char* data)
 {
     (void)data;

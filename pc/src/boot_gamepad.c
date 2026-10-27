@@ -237,8 +237,29 @@ static int action_held(const PcControllerState* state, int slot, unsigned* mask)
     return pressed;
 }
 
+/* The game's DualShock motors (boot_sdk.c PadSetAct): a gamepad's rumble,
+ * else the phone's haptics (apple_haptics.m, iPhone), when they change (a
+ * rumble is renewed while it lasts: SDL stops it after its duration). */
+extern unsigned pc_pad_motors(void) __attribute__((weak));         /* boot_sdk.c */
+extern void pc_haptics_motors(int small, int large) __attribute__((weak)); /* apple_haptics.m */
+static void motors(void)
+{
+    static unsigned last;
+    static uint64_t renewed;
+    unsigned m = pc_pad_motors ? pc_pad_motors() : 0;
+    uint64_t now = SDL_GetTicks();
+    if (pad) {
+        if (m != last || (m && now - renewed >= 500)) {
+            SDL_RumbleGamepad(pad, (Uint16)((m >> 8) * 257), (m & 1) ? 0xffff : 0, m ? 1000 : 0);
+            renewed = now;
+        }
+    } else if (pc_haptics_motors && m != last)
+        pc_haptics_motors((int)(m & 1), (int)(m >> 8));
+    last = m;
+}
 void pc_controller_poll(void)
 {
+    motors();
     if (!pad) {
         mask = 0;
         travel = 0;

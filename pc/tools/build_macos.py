@@ -251,6 +251,16 @@ def compile_metal_core(obj, command, source, out):
     return target, subprocess.run(args, cwd=root, capture_output=True, text=True)
 
 
+def compile_apple_sources(out):
+    """Objective-C units of the Apple builds alone (not in the Linux build's
+    manifest): the iPhone's haptics (pc/src/apple_haptics.m)."""
+    if not IOS:
+        return subprocess.CompletedProcess([], 0, "", "")
+    return subprocess.run(["clang", "-target", TARGET, "-x", "objective-c", "-fobjc-arc", "-O2", "-c",
+                           "pc/src/apple_haptics.m", "-o", str(out / "apple_haptics.o")], cwd=root,
+                          capture_output=True, text=True)
+
+
 def compile_metal_shaders(out):
     """The shaders' metallib and table (pc/tools/metal_shaders.py), the table compiled."""
     result = subprocess.run([sys.executable, "pc/tools/metal_shaders.py", "--out", str(out / "metal"),
@@ -368,6 +378,7 @@ def link(manifest, out):
     build_sdl(out)
     objects = [str(out / (pathlib.Path(o).stem + ".o")) for o in manifest["objects"]]
     objects += [str(out / "native_imports.o"), str(out / "imports.o")] + ([str(out / "mtl_shaders.o")] if METAL else [])
+    objects += [str(out / "apple_haptics.o")] if IOS else []
     seen, ordered = set(), []
     for o in objects:  # traps and overlay_statics_table are listed once
         if o not in seen:
@@ -417,7 +428,8 @@ def main():
         linux_out = root / LINUX_OUT
         for name, result in (compile_generated(linux_out, out, table, manifest)
                              + [("imports", write_imports(manifest["imports"], out))]
-                             + ([("metal shaders", compile_metal_shaders(out))] if METAL else [])):
+                             + ([("metal shaders", compile_metal_shaders(out))] if METAL else [])
+                             + ([("apple sources", compile_apple_sources(out))] if IOS else [])):
             print(f"{name}: {'ok' if not result.returncode else result.stderr[-3000:]}")
         if args.only == "link":
             result = link(manifest, out)
