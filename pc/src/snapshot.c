@@ -73,7 +73,8 @@
 extern unsigned pc_vsync_count(void);
 extern void pc_tick(void); /* boot_runtime.c */
 
-#if !(defined(__i386__) || defined(__x86_64__)) || (defined(_WIN32) && !defined(__x86_64__))
+#if !(defined(__i386__) || defined(__x86_64__) || (defined(__aarch64__) && defined(__APPLE__))) \
+    || (defined(_WIN32) && !defined(__x86_64__))
 void pc_vsync_boundary(void) { pc_tick(); }
 int pc_state_ranges(pc_state_range* out, int max) { (void)out; (void)max; return 0; }
 int pc_snapshot_available(void) { return 0; }
@@ -179,6 +180,56 @@ _Static_assert(__builtin_offsetof(snap_context, mxcsr) == 80 && __builtin_offset
 /* MinGW-w64 builds no stack protector (no canary to carry). */
 static uintptr_t read_canary(void) { return 0; }
 static void write_canary(uintptr_t v) { (void)v; }
+#elif defined(__aarch64__) && defined(__APPLE__)
+/* AArch64 (Mach-O): the boundary is called (bl), so lr is the return into
+ * the game; it tail-calls pc_tick, which returns there. pc_snap_enter(c, fn)
+ * loads c's registers, sp and lr, and jumps to fn, whose return goes back
+ * into the game. */
+__asm__(".text\n"
+        ".globl _pc_vsync_boundary\n"
+        ".p2align 2\n"
+        "_pc_vsync_boundary:\n"
+        "    adrp x16, _pc_snap_boundary@PAGE\n"
+        "    add x16, x16, _pc_snap_boundary@PAGEOFF\n"
+        "    stp x19, x20, [x16, #0]\n"
+        "    stp x21, x22, [x16, #16]\n"
+        "    stp x23, x24, [x16, #32]\n"
+        "    stp x25, x26, [x16, #48]\n"
+        "    stp x27, x28, [x16, #64]\n"
+        "    mov x17, sp\n"
+        "    stp x29, x17, [x16, #80]\n"
+        "    str x30, [x16, #96]\n"
+        "    stp d8, d9, [x16, #104]\n"
+        "    stp d10, d11, [x16, #120]\n"
+        "    stp d12, d13, [x16, #136]\n"
+        "    stp d14, d15, [x16, #152]\n"
+        "    mrs x17, fpcr\n"
+        "    str x17, [x16, #168]\n"
+        "    b _pc_tick\n"
+        ".globl _pc_snap_enter\n"
+        ".p2align 2\n"
+        "_pc_snap_enter:\n"
+        "    ldr x17, [x0, #168]\n"
+        "    msr fpcr, x17\n"
+        "    ldp d8, d9, [x0, #104]\n"
+        "    ldp d10, d11, [x0, #120]\n"
+        "    ldp d12, d13, [x0, #136]\n"
+        "    ldp d14, d15, [x0, #152]\n"
+        "    ldp x19, x20, [x0, #0]\n"
+        "    ldp x21, x22, [x0, #16]\n"
+        "    ldp x23, x24, [x0, #32]\n"
+        "    ldp x25, x26, [x0, #48]\n"
+        "    ldp x27, x28, [x0, #64]\n"
+        "    ldp x29, x17, [x0, #80]\n"
+        "    mov sp, x17\n"
+        "    ldr x30, [x0, #96]\n"
+        "    br x1\n");
+_Static_assert(__builtin_offsetof(snap_context, d) == 104 && __builtin_offsetof(snap_context, fpcr) == 168,
+    "the boundary's offsets");
+/* build_macos.py compiles the game's units without a stack protector:
+ * the saved frames hold no canary. */
+static uintptr_t read_canary(void) { return 0; }
+static void write_canary(uintptr_t v) { (void)v; }
 #elif defined(__x86_64__)
 __asm__(".text\n"
         ".globl pc_vsync_boundary\n"
@@ -264,6 +315,9 @@ __attribute__((noreturn)) void pc_snap_call_on_stack(void* top, void (*fn)(void)
 #ifdef _WIN32
 __asm__(".text\n.globl pc_snap_call_on_stack\n.def pc_snap_call_on_stack; .scl 2; .type 32; .endef\n"
         "pc_snap_call_on_stack:\n movq %rcx,%rsp\n andq $-16,%rsp\n subq $32,%rsp\n callq *%rdx\n ud2\n");
+#elif defined(__aarch64__) && defined(__APPLE__)
+__asm__(".text\n.globl _pc_snap_call_on_stack\n.p2align 2\n"
+        "_pc_snap_call_on_stack:\n and x0, x0, #-16\n mov sp, x0\n blr x1\n brk #1\n");
 #elif defined(__x86_64__)
 __asm__(".text\n.globl pc_snap_call_on_stack\n.type pc_snap_call_on_stack,@function\n"
         "pc_snap_call_on_stack:\n movq %rdi,%rsp\n andq $-16,%rsp\n callq *%rsi\n ud2\n"
@@ -303,12 +357,47 @@ static const char* text_range(size_t* size)
 #else
 extern char __start_rood_state_data[] __attribute__((weak)), __stop_rood_state_data[] __attribute__((weak));
 extern char __start_rood_state_bss[] __attribute__((weak)), __stop_rood_state_bss[] __attribute__((weak));
+#ifdef __APPLE__
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
+static const char* text_range(size_t* size)
+{
+    unsigned long bytes = 0;
+    const char* text = (const char*)getsectiondata(&_mh_execute_header, "__TEXT", "__text", &bytes);
+    *size = bytes;
+    return text;
+}
+/* The executable's mapped image (its segments but __PAGEZERO and
+ * __LINKEDIT): where ASLR may have put it this launch. A snapshot records
+ * it, and a resume moves every saved word that pointed into it (code
+ * addresses on the game stack, pointers to the game's statics) by the slide. */
+static void image_range(uintptr_t* start, uintptr_t* end)
+{
+    const struct mach_header_64* h = &_mh_execute_header;
+    const struct load_command* lc = (const struct load_command*)(h + 1);
+    uintptr_t base = (uintptr_t)h, text_vmaddr = 0, top = 0;
+    for (uint32_t i = 0; i < h->ncmds; i++, lc = (const struct load_command*)((const char*)lc + lc->cmdsize)) {
+        if (lc->cmd != LC_SEGMENT_64)
+            continue;
+        const struct segment_command_64* seg = (const struct segment_command_64*)lc;
+        if (!strcmp(seg->segname, "__TEXT"))
+            text_vmaddr = seg->vmaddr;
+        if (strcmp(seg->segname, "__PAGEZERO") && strcmp(seg->segname, "__LINKEDIT") && seg->vmaddr + seg->vmsize > top)
+            top = seg->vmaddr + seg->vmsize;
+    }
+    *start = base;
+    *end = top - text_vmaddr + base;
+}
+#else
 extern char __executable_start[], etext[];
 static const char* text_range(size_t* size)
 {
     *size = (size_t)(etext - __executable_start);
     return __executable_start;
 }
+/* A fixed (non-PIE) image: nothing moves between processes. */
+static void image_range(uintptr_t* start, uintptr_t* end) { *start = *end = 0; }
+#endif
 #endif
 /* snapshot_key.c (build_boot.py, 64 bits): the game's code and state layout. */
 extern const unsigned long long pc_snapshot_code_key __attribute__((weak));
@@ -420,7 +509,7 @@ static uint64_t layout_key(void) { return &pc_snapshot_layout_key ? pc_snapshot_
 
 /* ---- the file ---- */
 #define MAGIC "ROODSNAP"
-#define VERSION 2 /* 2: the stack from the vsync boundary, code and layout keys */
+#define VERSION 3 /* 2: the stack from the vsync boundary, code and layout keys; 3: the image's range */
 enum { CHUNK_END, CHUNK_MEMORY, CHUNK_SPU, CHUNK_LOG, CHUNK_FOG };
 typedef struct {
     char magic[8];
@@ -429,6 +518,7 @@ typedef struct {
     uint32_t vsync, reserved;
     snap_context boundary;
     uint64_t canary;
+    uint64_t image_start, image_end; /* image_range when saved (0: a fixed image) */
 } header;
 typedef struct {
     uint32_t tag, reserved;
@@ -517,6 +607,9 @@ static int write_file(const char* path, uintptr_t sp, char* error, int esize)
     h.vsync = pc_vsync_count();
     h.boundary = pc_snap_boundary;
     h.canary = read_canary();
+    uintptr_t image_start, image_end;
+    image_range(&image_start, &image_end);
+    h.image_start = image_start, h.image_end = image_end;
     int ok = fwrite(&h, sizeof h, 1, f) == 1;
     range r[MAX_RANGES];
     int n = ranges(r);
@@ -775,7 +868,24 @@ typedef struct {
     loaded* chunks;
     int count;
     char* stack_at; /* the saved stack's place (its sp at the boundary) */
+    intptr_t slide; /* this launch's image minus the saved one's (ASLR) */
 } prepared;
+
+/* A saved address inside the saved image, moved into this launch's. */
+static uintptr_t moved(const prepared* p, uintptr_t value)
+{
+    return p->slide && value >= p->h.image_start && value < p->h.image_end ? value + (uintptr_t)p->slide : value;
+}
+/* Every aligned word of saved native memory (the game's statics and stack)
+ * that pointed into the saved image. */
+static void move_words(const prepared* p, void* data, size_t size)
+{
+    if (!p->slide)
+        return;
+    uintptr_t* w = data;
+    for (size_t i = 0; i < size / sizeof *w; i++)
+        w[i] = moved(p, w[i]);
+}
 
 static void discard(prepared* p)
 {
@@ -795,6 +905,14 @@ static const char* prepare(const char* path, prepared* p)
     p->count = 0;
     p->stack_at = NULL;
     p->chunks = load(path, hp, &p->count, &why);
+    uintptr_t image_start, image_end;
+    image_range(&image_start, &image_end);
+    p->slide = hp->image_start && image_start ? (intptr_t)(image_start - hp->image_start) : 0;
+    if (p->chunks && p->slide && image_end - image_start != hp->image_end - hp->image_start)
+        why = "made by another build of the game (its image differs)";
+    for (int i = 0; p->chunks && i < p->count; i++)
+        if (p->chunks[i].c.tag == CHUNK_MEMORY)
+            p->chunks[i].c.address = moved(p, (uintptr_t)p->chunks[i].c.address);
     loaded* chunks = p->chunks;
     int count = p->count;
     size_t game_stack_size;
@@ -854,6 +972,10 @@ static char* apply(prepared* p, const char* path, int replay_log, size_t* stack_
                 continue;
             }
             memcpy((void*)(uintptr_t)c->address, data, (size_t)c->size);
+            /* the game's statics (in the image) may point into it */
+            if (p->slide && (uintptr_t)c->address - (uintptr_t)p->slide >= p->h.image_start
+                && (uintptr_t)c->address - (uintptr_t)p->slide < p->h.image_end)
+                move_words(p, (void*)(uintptr_t)c->address, (size_t)c->size);
         } else if (c->tag == CHUNK_SPU) {
             if (!pc_spu_state_load || !pc_spu_state_load(data, (int)c->size)) {
                 fprintf(stderr, "[snapshot] cannot resume %s: the SPU state does not fit\n", path);
@@ -885,10 +1007,12 @@ static char* apply(prepared* p, const char* path, int replay_log, size_t* stack_
  * into the game at the saved boundary (the rest of that vsync). */
 static __attribute__((noreturn)) void enter_saved(prepared* p, char* stack_image, size_t stack_bytes)
 {
+    move_words(p, stack_image, stack_bytes); /* return addresses, pointers to statics */
     memcpy(p->stack_at, stack_image, stack_bytes);
     free(stack_image);
     write_canary((uintptr_t)p->h.canary);
     pc_snap_boundary = p->h.boundary;
+    move_words(p, pc_snap_boundary.regs, sizeof pc_snap_boundary.regs);
     pc_game_stack_entered();
     pc_snap_enter(&pc_snap_boundary, pc_tick_resumed);
 }

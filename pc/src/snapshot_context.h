@@ -17,6 +17,16 @@ typedef struct {
 } snap_context;
 #define SNAP_CTX_SP_INDEX 8
 #define SNAP_CTX_IP_INDEX 9
+#elif defined(__aarch64__)
+/* AArch64 (macOS, iOS): x19-x28, the frame pointer, sp and the return
+ * address (lr at the call), then d8-d15's low halves and fpcr. */
+typedef struct {
+    uintptr_t regs[13]; /* x19 .. x28, x29, sp, lr */
+    uint64_t d[8];      /* d8 .. d15 */
+    uint64_t fpcr;
+} snap_context;
+#define SNAP_CTX_SP_INDEX 11
+#define SNAP_CTX_IP_INDEX 12
 #else
 typedef struct {
     uintptr_t regs[8]; /* x86_64: rbx rbp r12 r13 r14 r15 rsp rip; i386: ebx esi edi ebp esp eip */

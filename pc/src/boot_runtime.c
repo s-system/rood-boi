@@ -384,8 +384,10 @@ __attribute__((noreturn)) void pc_psx_bad_pointer(const void* pointer)
 #include <mach-o/ldsyms.h>
 #endif
 #define CODE_TOKENS 8192
-static uintptr_t code_tokens[CODE_TOKENS] __attribute__((section(".data.rood_host")));
-static uint32_t code_token_count __attribute__((section(".data.rood_host")));
+/* Game state (saved by save states: tokens live in guest memory); a resume
+ * in another launch moves the entries with the image (snapshot.c). */
+static uintptr_t code_tokens[CODE_TOKENS];
+static uint32_t code_token_count;
 static int pc_is_code(uintptr_t p)
 {
 #ifdef __APPLE__

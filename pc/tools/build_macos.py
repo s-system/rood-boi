@@ -79,7 +79,10 @@ def write_section_header(table, path):
 # gcc's leniency): warnings, as on Linux.
 LENIENT = ["-Wno-error", "-Wno-implicit-function-declaration", "-Wno-int-conversion",
            "-Wno-incompatible-pointer-types", "-Wno-int-to-pointer-cast", "-Wno-return-type",
-           "-Wno-incompatible-function-pointer-types", "-w"]
+           "-Wno-incompatible-function-pointer-types", "-w",
+           # Save states copy the game's stack frames into another launch,
+           # where a stack canary would differ (pc/src/snapshot.c).
+           "-fno-stack-protector"]
 
 
 def short_section(name, table):
