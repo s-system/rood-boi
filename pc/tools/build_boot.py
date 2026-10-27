@@ -373,8 +373,20 @@ def compile_twin(args, source, kind="c"):
     return result.returncode == 0
 
 
+# What each linked object is made of, for pc/tools/build_macos.py: its
+# compile command (before the guest-base rewrite of host units: a Mach-O twin
+# is preprocessed against macOS's headers) and the edits made to it.
+unit_commands = {}  # object path -> compile command
+object_edits = {}  # object path -> [objcopy arguments, ...]
+
+
+def record_edit(obj, args):
+    object_edits.setdefault(str(obj), []).append(list(args))
+
+
 def objcopy(args, obj):
     """Apply a symbol edit to an object and to its COFF twin."""
+    record_edit(obj, args)
     if not coff:
         run(["objcopy", *args, str(obj)])
     if win:
@@ -445,6 +457,8 @@ def compile_object(args, source, kind="c", win_args=None):
         return True
     if coff:
         return compile_twin(win_args or args, source, kind)
+    if "-o" in args:
+        unit_commands[str(args[args.index("-o") + 1])] = list(map(str, args))
     if guest_base:
         args = guest_base_host(args)
     result = object_cache.compile(args)
@@ -472,6 +486,7 @@ def state_sections(obj):
         if section and int(section.group(4), 16) and "rood_host" not in section.group(1):
             renames.append(f"--rename-section={section.group(1)}=rood_state_{section.group(2)}")
     if renames:
+        record_edit(obj, renames)
         run(["objcopy", *renames, str(obj)])
 
 
@@ -503,6 +518,7 @@ def state_sections_coff(obj):
 def compile_generated(args):
     """A generated table (game data: saved with the game state): both
     objects must build."""
+    unit_commands[str(args[args.index("-o") + 1])] = list(map(str, args))
     if not coff:
         run(args)
     if win:
@@ -1169,6 +1185,7 @@ for source, name in sources:
                 renames.append(f"--rename-section={section.group(1)}=rood_ovl_{key}_{kind}")
                 overlay_statics.setdefault(overlay_file, set()).add(kind)
         if renames:
+            record_edit(obj, renames)
             run(["objcopy", *renames, str(obj)])
         if win:
             # COFF: .data$<name> (GCC on MinGW puts zero-initialised statics
@@ -2491,6 +2508,16 @@ link = (
 )
 # The link, for pc/tests/snapshot_resume_smoke.py (it relinks with the engine moved).
 (out / "link_command.json").write_text(json.dumps(link) + "\n")
+# Everything pc/tools/build_macos.py needs to rebuild the linked objects as
+# Mach-O twins and link them on a Mac: the objects in link order, each one's
+# compile command and edits, and the data imports' addresses.
+(out / "macos_manifest.json").write_text(json.dumps({
+    "guest_base": guest_base,
+    "objects": [str(o) for o in [*objects, out / "traps.o", out / "overlay_statics_table.o"]],
+    "commands": unit_commands,
+    "edits": object_edits,
+    "imports": {line.split(" = ")[0]: int(line.split(" = ")[1].rstrip(";"), 0) for line in assign},
+}, indent=1) + "\n")
 run(link)
 print(
     f"Built {out / ('rood_battle_probe' if battle else 'rood_boot')}: {len(assign)} data imports, {len(traps)} fail-fast function imports"

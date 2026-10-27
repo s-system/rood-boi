@@ -1057,7 +1057,11 @@ unsigned pc_rpc_buttons(void)
 #define __data_start __data_start__
 #define _end __bss_end__
 #endif
+#ifdef __APPLE__
+extern char __data_start[] __asm__("section$start$__DATA$__data"), _end[] __asm__("section$end$__DATA$__bss");
+#else
 extern char __data_start[], _end[];
+#endif
 static int readable(uintptr_t address, uintptr_t length)
 {
     uintptr_t end = address + length;

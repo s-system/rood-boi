@@ -36,9 +36,9 @@ static __inline__ __attribute__((always_inline, unused)) unsigned long __rood_gu
 """
 
 
-def ast(data, extra=()):
+def ast(data, extra=(), target=TARGET):
     result = subprocess.run(
-        ["clang", "-target", TARGET, "-fsyntax-only", "-w", "-ferror-limit=0", "-fgnuc-version=4.2.1",
+        ["clang", "-target", target, "-fsyntax-only", "-w", "-ferror-limit=0", "-fgnuc-version=4.2.1",
          "-fno-builtin", *extra, "-Xclang", "-ast-dump=json", "-x", "c", "-"],
         input=data, capture_output=True)
     if not result.stdout:
@@ -97,8 +97,8 @@ def conversions(root):
     return found
 
 
-def rewrite(data, base):
-    spans = conversions(ast(data))
+def rewrite(data, base, target=TARGET):
+    spans = conversions(ast(data, target=target))
     # Insert from the end so earlier offsets stay valid; nested spans are
     # fine because each edit only adds text at two points. At one offset the
     # closing text of an inner span goes before the opening of the next.
