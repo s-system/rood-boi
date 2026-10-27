@@ -102,6 +102,7 @@ static view_target chain[2];
 static vk_image smaa_edges, smaa_weights, smaa_area, smaa_search;
 
 static VkDescriptorSetLayout scaled_set, single_set, triple_set;
+static int scaled_separate; /* scaled_sep.frag (make_pipelines) */
 static VkPipelineLayout scaled_layout, fxaa_layout, vram_layout, smaa_layout, downsample_layout;
 static VkPipeline scaled_to_window, scaled_to_view, fxaa_pipeline, fxaa_to_view,
     vram_pipeline, smaa_edges_pipeline, smaa_weights_pipeline, smaa_blend_to_window, smaa_blend_to_view,
@@ -281,21 +282,33 @@ static int make_pipelines(void)
 {
     /* 12-15: the probe field (vk_probes.inc); 16: the lights; 17: the medium's texture; 18, 19: the fog volumes;
      * 20: the menu's backdrop (backdrop_keep); 21, 22: the particles (vk_particles.inc) */
-    VkDescriptorType scaled_types[25];
+    /* The present pass reads 22 textures. Where a stage has fewer samplers
+     * (Metal through MoltenVK: 16; ROOD_VK_SEPARATE=1 forces it) it takes
+     * scaled_sep.frag: sampled images sharing two samplers (25: nearest,
+     * 26: linear). */
+    const char* separate_env = getenv("ROOD_VK_SEPARATE");
+    scaled_separate = vk.properties.limits.maxPerStageDescriptorSamplers < 22
+                   || (separate_env && *separate_env == '1');
+    VkDescriptorType scaled_types[27];
     for (int i = 0; i < 25; i++)
-        scaled_types[i] = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        scaled_types[i] = scaled_separate ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     scaled_types[0] = scaled_types[12] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     scaled_types[16] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    scaled_set = vk_push_layout(scaled_types, 25); /* 23: the material target; 24: traced reflections */
-    single_set = vk_push_layout(&scaled_types[1], 1);
-    triple_set = vk_push_layout(&scaled_types[1], 3);
+    scaled_types[25] = scaled_types[26] = VK_DESCRIPTOR_TYPE_SAMPLER;
+    /* 23: the material target; 24: traced reflections */
+    scaled_set = vk_push_layout(scaled_types, scaled_separate ? 27 : 25);
+    static const VkDescriptorType combined[3] = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER };
+    single_set = vk_push_layout(combined, 1);
+    triple_set = vk_push_layout(combined, 3);
     scaled_layout = make_layout(scaled_set, 0);
     fxaa_layout = make_layout(single_set, 8);
     vram_layout = make_layout(single_set, 32);
     smaa_layout = make_layout(triple_set, sizeof(smaa_push));
     downsample_layout = make_layout(single_set, sizeof(downsample_push));
     VkShaderModule vs = vk_shader(vk_spv_fullscreen_vert, vk_spv_fullscreen_vert_size),
-                   scaled = vk_shader(vk_spv_scaled_frag, vk_spv_scaled_frag_size),
+                   scaled = scaled_separate ? vk_shader(vk_spv_scaled_sep_frag, vk_spv_scaled_sep_frag_size)
+                                            : vk_shader(vk_spv_scaled_frag, vk_spv_scaled_frag_size),
                    fxaa = vk_shader(vk_spv_fxaa_frag, vk_spv_fxaa_frag_size),
                    vram = vk_shader(vk_spv_present_vram_frag, vk_spv_present_vram_frag_size),
                    edges = vk_shader(vk_spv_smaa_edges_frag, vk_spv_smaa_edges_frag_size),
@@ -1131,7 +1144,11 @@ void pc_vk_present(const uint16_t* vram, int x, int y, int w, int h)
             const vk_image* input = stage_begin(stage, stages, lit_w, lit_h, view_x, view_y, view_w, view_h);
             cmd = vk_cmd();
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, stages > 1 ? scaled_to_view : scaled_to_window);
-            vk_descriptors d = { 0 };
+            vk_descriptors d = { .sampled_images = scaled_separate };
+            if (scaled_separate) { /* scaled_sep.frag's own samplers */
+                vk_descriptors_sampler(&d, 25, vk.nearest);
+                vk_descriptors_sampler(&d, 26, vk.linear);
+            }
             vk_descriptors_buffer(&d, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, ubo.buffer, ubo.offset, sizeof(present_ubo));
             vk_descriptors_image(&d, 1, t->color.view, vk.linear);
             vk_descriptors_image(&d, 2, t->depth.view, vk.nearest);

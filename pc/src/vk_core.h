@@ -312,8 +312,10 @@ typedef struct {
     VkWriteDescriptorSetAccelerationStructureKHR structures[2];
     VkAccelerationStructureKHR structure_handles[2];
     int count, structure_count;
+    int sampled_images; /* vk_descriptors_image writes sampled images (the shader's own samplers) */
 } vk_descriptors;
 void vk_descriptors_image(vk_descriptors* d, int binding, VkImageView view, VkSampler sampler);
+void vk_descriptors_sampler(vk_descriptors* d, int binding, VkSampler sampler);
 void vk_descriptors_storage_image(vk_descriptors* d, int binding, VkImageView view);
 void vk_descriptors_buffer(vk_descriptors* d, int binding, VkDescriptorType type, VkBuffer buffer, VkDeviceSize offset,
     VkDeviceSize range);

@@ -1646,8 +1646,16 @@ static VkWriteDescriptorSet* next_write(vk_descriptors* d, int binding, VkDescri
 }
 void vk_descriptors_image(vk_descriptors* d, int binding, VkImageView view, VkSampler sampler)
 {
-    VkWriteDescriptorSet* w = next_write(d, binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    d->images[d->count] = (VkDescriptorImageInfo){ sampler, view, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet* w = next_write(d, binding,
+        d->sampled_images ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    d->images[d->count] = (VkDescriptorImageInfo){ d->sampled_images ? VK_NULL_HANDLE : sampler, view,
+        VK_IMAGE_LAYOUT_GENERAL };
+    w->pImageInfo = &d->images[d->count++];
+}
+void vk_descriptors_sampler(vk_descriptors* d, int binding, VkSampler sampler)
+{
+    VkWriteDescriptorSet* w = next_write(d, binding, VK_DESCRIPTOR_TYPE_SAMPLER);
+    d->images[d->count] = (VkDescriptorImageInfo){ sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
     w->pImageInfo = &d->images[d->count++];
 }
 void vk_descriptors_storage_image(vk_descriptors* d, int binding, VkImageView view)
