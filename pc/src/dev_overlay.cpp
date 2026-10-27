@@ -171,8 +171,11 @@ extern "C" void pc_overlay_init(SDL_Window* window, SDL_GLContext context)
     ui_scale = detect_scale(window);
 #ifdef ROOD_VULKAN
     if (pc_vk_on()) {
-        if (!ImGui_ImplSDL3_InitForVulkan(window) || !pc_vk_overlay_init()) {
+        bool platform = ImGui_ImplSDL3_InitForVulkan(window);
+        if (!platform || !pc_vk_overlay_init()) {
             fprintf(stderr, "[overlay] SDL3/Vulkan backends unavailable\n");
+            if (platform)
+                ImGui_ImplSDL3_Shutdown(); /* (ImGui asserts on a context destroyed with a live backend) */
             ImGui::DestroyContext();
             return;
         }

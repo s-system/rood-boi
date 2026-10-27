@@ -186,7 +186,8 @@ void pc_window_init(int enabled, int run_fast)
 #ifdef ROOD_VULKAN
     /* Vulkan presentation (vk_present.c) when asked for; OpenGL otherwise
      * or when Vulkan is unavailable. */
-    if (renderer && !strcmp(renderer, "vulkan")) {
+    /* (ROOD_RENDERER=metal: the same renderer on Metal, where mtl_core.m replaces vk_core.c) */
+    if (renderer && (!strcmp(renderer, "vulkan") || !strcmp(renderer, "metal"))) {
         window = pc_vk_create_window(title, width, height);
         if (!window)
             fprintf(stderr, "[window] Vulkan unavailable; using OpenGL\n");

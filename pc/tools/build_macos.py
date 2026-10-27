@@ -27,6 +27,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 
@@ -43,10 +44,18 @@ DROP_PREFIX = ("-gz", "-Werror", "-mcmodel", "-fcf-protection", "-MF", "-MT", "-
 # Host units: Darwin's spellings of what the Linux sources use, and the
 # headers Linux finds in the system (OpenGL as <GL/gl.h>, Vulkan's headers,
 # which SDL 3 vendors; the loader is reached through SDL at run time).
+# The Vulkan renderer runs on Metal (pc/src/mtl_core.m in place of
+# vk_core.c, the shaders from pc/tools/metal_shaders.py): ROOD_METAL, unless
+# --moltenvk builds it on Vulkan through MoltenVK (pc/build/macos-vk).
+METAL = "--moltenvk" not in sys.argv
+if METAL:
+    HOST_DARWIN_METAL = ["-DROOD_METAL"]
+else:
+    HOST_DARWIN_METAL = []
 HOST_DARWIN = ["-D_DARWIN_C_SOURCE", "-D_XOPEN_SOURCE=700", "-Dst_mtim=st_mtimespec",
                "-Ipc/macos/include", "-Ipc/third_party/SDL3/src/video/khronos",
                "-include", "pc/macos/include/mac_compat.h",
-               "-include", "pc/build/macos/include/mac_sections.h"]
+               "-include", "pc/build/macos/include/mac_sections.h"] + HOST_DARWIN_METAL
 # ELF section bounds the sources name (__start_X/__stop_X) that no edit
 # creates: the game's code range of the Linux layout (absent here: empty).
 EXTRA_SECTIONS = {"rood_game_text": "__TEXT"}
@@ -220,11 +229,35 @@ def preprocessed_flags(flags):
     return out
 
 
+def compile_metal_core(obj, command, source, out):
+    """vk_core.c's place: mtl_core.m (Objective-C, manual retain/release), the
+    Vulkan core's API on Metal. It reads no guest memory: no rewrite."""
+    flags = [f for f in translate(command, source) if f.startswith(("-D", "-I"))]
+    target = out / (pathlib.Path(obj).stem + ".o")
+    args = ["clang", "-target", TARGET, "-x", "objective-c", "-fno-objc-arc", "-O2", "-g", "-c",
+            str(pathlib.Path(source).with_name("mtl_core.m")), "-o", str(target), *flags, *HOST_DARWIN,
+            "-Wall", "-Wno-unused-function"]
+    return target, subprocess.run(args, cwd=root, capture_output=True, text=True)
+
+
+def compile_metal_shaders(out):
+    """The shaders' metallib and table (pc/tools/metal_shaders.py), the table compiled."""
+    result = subprocess.run([sys.executable, "pc/tools/metal_shaders.py", "--out", str(out / "metal")], cwd=root,
+                            capture_output=True, text=True)
+    if result.returncode:
+        return result
+    shutil.copyfile(out / "metal/rood.metallib", out / "rood.metallib")  # beside the executable (mtl_core.m)
+    return subprocess.run(["clang", "-target", TARGET, "-O2", "-c", str(out / "metal/mtl_shaders.c"), "-o",
+                           str(out / "mtl_shaders.o"), "-Ipc/src"], cwd=root, capture_output=True, text=True)
+
+
 def compile_host(obj, command, edits, out, table, base):
     """A host unit (pc/src, third-party): compiled from its source against
     macOS's headers; a C unit gets the guest-base rewrite on its preprocessed
     text, as on Linux (build_boot.py guest_base_host)."""
     source = next(a for a in command[1:] if a.endswith((".c", ".C", ".cpp", ".cc")))
+    if pathlib.Path(source).name == "vk_core.c" and METAL:
+        return compile_metal_core(obj, command, source, out)
     cxx = command[0] in ("g++", "c++") or source.endswith((".cpp", ".cc"))
     renames, sections, exposed = edits_of(edits)
     # No NRD on macOS: vk_nrd.cpp builds its stub.
@@ -263,7 +296,7 @@ def compile_host(obj, command, edits, out, table, base):
     return target, subprocess.run(args, cwd=root, capture_output=True, text=True)
 
 
-FRAMEWORKS = ["Cocoa", "IOKit", "CoreAudio", "AudioToolbox", "CoreVideo", "Carbon", "ForceFeedback",
+FRAMEWORKS = ["Metal", "QuartzCore", "Cocoa", "IOKit", "CoreAudio", "AudioToolbox", "CoreVideo", "Carbon", "ForceFeedback",
               "GameController", "Metal", "QuartzCore", "CoreHaptics", "UniformTypeIdentifiers",
               "AVFoundation", "CoreMedia", "OpenGL"]
 
@@ -316,7 +349,7 @@ def build_sdl(out):
 def link(manifest, out):
     build_sdl(out)
     objects = [str(out / (pathlib.Path(o).stem + ".o")) for o in manifest["objects"]]
-    objects += [str(out / "native_imports.o"), str(out / "imports.o")]
+    objects += [str(out / "native_imports.o"), str(out / "imports.o")] + ([str(out / "mtl_shaders.o")] if METAL else [])
     seen, ordered = set(), []
     for o in objects:  # traps and overlay_statics_table are listed once
         if o not in seen:
@@ -339,9 +372,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--only", choices=["game", "host", "generated", "link"])
     parser.add_argument("--jobs", type=int, default=os.cpu_count())
+    parser.add_argument("--moltenvk", action="store_true", help="Vulkan through MoltenVK (pc/build/macos-vk), not Metal")
     args = parser.parse_args()
     manifest = json.loads((root / "pc/build/boot64-gb/macos_manifest.json").read_text())
-    out = root / "pc/build/macos"
+    out = root / ("pc/build/macos" if METAL else "pc/build/macos-vk")
     out.mkdir(parents=True, exist_ok=True)
     table_path = out / "macos_sections.json"
     table = json.loads(table_path.read_text()) if table_path.exists() else {}
@@ -355,7 +389,9 @@ def main():
 
     if args.only in ("generated", "link"):
         linux_out = root / "pc/build/boot64-gb"
-        for name, result in compile_generated(linux_out, out, table, manifest) + [("imports", write_imports(manifest["imports"], out))]:
+        for name, result in (compile_generated(linux_out, out, table, manifest)
+                             + [("imports", write_imports(manifest["imports"], out))]
+                             + ([("metal shaders", compile_metal_shaders(out))] if METAL else [])):
             print(f"{name}: {'ok' if not result.returncode else result.stderr[-3000:]}")
         if args.only == "link":
             result = link(manifest, out)

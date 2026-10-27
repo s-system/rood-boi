@@ -19,6 +19,9 @@ int pc_vk_shadows_sun(const float dir[3], float matrix[16], float light[4], floa
 #include "ui/menu_light.h" /* the model view's studio light */
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
+#ifdef ROOD_METAL
+int mtl_create_surface(SDL_Window* window, VkSurfaceKHR* out); /* mtl_core.m: the window's CAMetalLayer */
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,6 +106,24 @@ static vk_image smaa_edges, smaa_weights, smaa_area, smaa_search;
 
 static VkDescriptorSetLayout scaled_set, single_set, triple_set;
 static int scaled_separate; /* scaled_sep.frag (make_pipelines) */
+/* Lighting (scaled.frag) at the internal resolution when the view is larger
+ * (a Retina window over a 4x target: 4x the pixels lit from the same
+ * G-buffer texels), then magnified by the supersampling stage. ROOD_LIT=view
+ * lights every view pixel; by default on Apple only (Metal's tile GPUs pay
+ * per lit pixel), ROOD_LIT=internal elsewhere. */
+static int lit_internal(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* v = getenv("ROOD_LIT");
+#ifdef __APPLE__
+        on = !(v && !strcmp(v, "view"));
+#else
+        on = v && !strcmp(v, "internal");
+#endif
+    }
+    return on;
+}
 static VkPipelineLayout scaled_layout, fxaa_layout, vram_layout, smaa_layout, downsample_layout;
 static VkPipeline scaled_to_window, scaled_to_view, fxaa_pipeline, fxaa_to_view,
     vram_pipeline, smaa_edges_pipeline, smaa_weights_pipeline, smaa_blend_to_window, smaa_blend_to_view,
@@ -358,7 +379,11 @@ SDL_Window* pc_vk_create_window(const char* title, int width, int height)
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
     pc_window_place(props, width, height); /* boot_window.c: a remembered place, else (40, 40) */
+#ifdef ROOD_METAL
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_METAL_BOOLEAN, true);
+#else
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+#endif
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, pc_window_high_density());
     SDL_Window* win = pc_window_create(props);
@@ -372,19 +397,32 @@ SDL_Window* pc_vk_create_window(const char* title, int width, int height)
         SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height);
         win = pc_window_create(props);
         SDL_DestroyProperties(props);
+#ifdef ROOD_METAL
+        if (!win) {
+#else
         if (!win || !SDL_Vulkan_LoadLibrary(NULL)) {
+#endif
             fprintf(stderr, "[vk] no Vulkan window: %s\n", SDL_GetError());
             return win ? abandon(win) : NULL;
         }
     }
+#ifdef ROOD_METAL
+    if (!vk_core_init(NULL, 0))
+        return abandon(win);
+#else
     Uint32 extension_count = 0;
     const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&extension_count);
     if (!vk_core_init(extensions, extensions ? extension_count : 0))
         return abandon(win);
+#endif
     window = win;
     SDL_GetWindowSizeInPixels(win, &window_w, &window_h);
     int headless = !strcmp(SDL_GetCurrentVideoDriver(), "offscreen") || getenv("ROOD_VK_HEADLESS");
+#ifdef ROOD_METAL
+    if (!headless && mtl_create_surface(win, &surface)) {
+#else
     if (!headless && vkCreateSwapchainKHR && SDL_Vulkan_CreateSurface(win, vk.instance, NULL, &surface)) {
+#endif
         VkBool32 supported = VK_FALSE;
         vkGetPhysicalDeviceSurfaceSupportKHR(vk.gpu, vk.queue_family, surface, &supported);
         if (!supported || !make_swapchain()) {
@@ -1087,6 +1125,8 @@ void pc_vk_present(const uint16_t* vram, int x, int y, int w, int h)
             int lit_w = view_w, lit_h = view_h, ssaa = 0;
             if (pc_aa_ssaa > 1.0f && w * pc_hw_scale > view_w && h * pc_hw_scale > view_h)
                 ssaa = 1, lit_w = w * pc_hw_scale, lit_h = h * pc_hw_scale;
+            else if (lit_internal() && w * pc_hw_scale < view_w && h * pc_hw_scale < view_h)
+                ssaa = 1, lit_w = w * pc_hw_scale, lit_h = h * pc_hw_scale; /* lit, then magnified */
             int post = pc_gl_aa == PC_AA_FXAA || (pc_gl_aa == PC_AA_SMAA && smaa_ready()) ? pc_gl_aa : PC_AA_OFF;
             int blur = !pc_gl_show_depth && (post_frame.flags & 3);
             /* The post stack's grade pass (post.h): only when an effect is on; never on the depth view. */

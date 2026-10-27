@@ -437,27 +437,46 @@ vec3 low_haze(vec3 c, vec3 world) {
     float step_ = (span.y - span.x) / float(STEPS), jitter = ign(gl_FragCoord.xy + 17.0);
     vec3 sum = vec3(0.0);
     float transmittance = 1.0;
+    // The medium at each step first (its in-scattering weight), then each
+    // light over the steps only when its range reaches the ray's segment
+    // (beyond pos.w its falloff is zero): the same sum, without testing
+    // every light at every step.
+    vec3 step_at[STEPS], weight[STEPS];
     for (int k = 0; k < STEPS; k++) {
         vec3 x = eye + dir * (span.x + (float(k) + jitter) * step_);
+        step_at[k] = x;
+        weight[k] = vec3(0.0);
         vec3 scatter, emit;
         float extinction = medium_at(x, scatter, emit);
         if (extinction <= 0.0) continue;
+        float a = medium_step(extinction, step_, transmittance);
+        weight[k] = transmittance * scatter * ((1.0 - a) / extinction);
         vec3 here = vec3(0.0);
-        for (int i = 0; i < light_count; i++) {
-            vec3 centre = window_aperture(i) ? window_centre(i, x) : lights[i].pos.xyz;
+        if (env_sun_on())
+            here = env_sun_col.rgb * medium_phase(dot(dir, env_sun_dir.xyz), g)
+                 * (u.env_mode.x == 0 ? medium_sun_visibility(env_sun_map_point(x, fract(jitter + float(k) * 0.618034))) : 1.0);
+        sum += weight[k] * here + transmittance * emit * ((1.0 - a) / extinction);
+        transmittance *= a;
+    }
+    vec3 first_ = step_at[0], last_ = step_at[STEPS - 1];
+    for (int i = 0; i < light_count; i++) {
+        bool in_window = window_aperture(i);
+        if (!in_window) {
+            vec3 seg = last_ - first_, p = lights[i].pos.xyz - first_;
+            float t = clamp(dot(p, seg) / max(dot(seg, seg), 1e-6), 0.0, 1.0);
+            if (length(p - seg * t) >= lights[i].pos.w) continue;
+        }
+        for (int k = 0; k < STEPS; k++) {
+            if (weight[k] == vec3(0.0)) continue;
+            vec3 x = step_at[k];
+            vec3 centre = in_window ? window_centre(i, x) : lights[i].pos.xyz;
             vec3 to = centre - x; float dl = length(to); vec3 l = to / max(dl, 1e-3);
             float f = clamp(dl / lights[i].pos.w, 0.0, 1.0);
             float a = (1.0 - f * f) * (1.0 - f * f);
             a *= light_shape(lights[i].col.w, lights[i].pos.xyz, lights[i].dir, lights[i].right, lights[i].up, x, l);
-            if (window_aperture(i)) a *= window_transmission(i, x);
-            here += lights[i].col.rgb * a * medium_phase(dot(dir, l), g);
+            if (in_window) a *= window_transmission(i, x);
+            sum += weight[k] * lights[i].col.rgb * a * medium_phase(dot(dir, l), g);
         }
-        if (env_sun_on())
-            here += env_sun_col.rgb * medium_phase(dot(dir, env_sun_dir.xyz), g)
-                  * (u.env_mode.x == 0 ? medium_sun_visibility(env_sun_map_point(x, fract(jitter + float(k) * 0.618034))) : 1.0);
-        float a = medium_step(extinction, step_, transmittance);
-        sum += transmittance * (scatter * here + emit) * ((1.0 - a) / extinction);
-        transmittance *= a;
     }
     return c * transmittance + medium_limit_light(sum);
 }
