@@ -18,6 +18,7 @@
  * shade. */
 #define _POSIX_C_SOURCE 200809L
 #include "render_gl.h"
+extern float pc_widescreen_narrow; /* PsyX_GTE.cpp: X narrowed by (4/3) / the view's aspect (0.75: 16:9) */
 #include "render_state.h"
 #include "room_editor.h"
 #include "occlusion.h" /* fading what hides the characters in play */
@@ -1068,7 +1069,7 @@ int render_list_screen_bounds(uint32_t id, const render_target* target, int out[
     if (!list)
         return 0;
     const render_camera* cam = target->camera ? target->camera : &list->camera;
-    float hx = cam->h * (list->camera.widescreen ? 0.75f : 1.0f);
+    float hx = cam->h * (list->camera.widescreen ? pc_widescreen_narrow : 1.0f);
     float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f };
     static float box[RENDER_MAX_BONES][6];
     render_transform palette[RENDER_MAX_BONES];
@@ -1171,7 +1172,7 @@ static int sprite_corners(const draw_list* list, const render_polygon* poly, con
             int a1 = (b + 1) % 3, a2 = (b + 2) % 3, b1 = (a + 1) % 3, b2 = (a + 2) % 3;
             inv[a][b] = (r[a1][b1] * r[a2][b2] - r[a1][b2] * r[a2][b1]) / det;
         }
-    float hx = cam->h * (cam->widescreen ? 0.75f : 1.0f);
+    float hx = cam->h * (cam->widescreen ? pc_widescreen_narrow : 1.0f);
     float k = poly->offset_depth ? (float)poly->offset_depth / z : 1.0f;
     float sx = floorf(hx * floorf(view[0]) / z), sy = floorf(cam->h * floorf(view[1]) / z);
     for (int v = 0; v < 4; v++) {
@@ -2372,14 +2373,14 @@ static const render_camera* begin_draw(const draw_list* list, const render_targe
     gl_Uniform1i(u_filtering, target->filtering);
     gl_Uniform1ui(u_window, target->window);
     gl_Uniform1i(u_mask_set, target->mask_set);
-    float hx = cam->h * (list->camera.widescreen ? 0.75f : 1.0f);
+    float hx = cam->h * (list->camera.widescreen ? pc_widescreen_narrow : 1.0f);
     gl_Uniform4f(u_projection, hx, cam->h, cam->ofx + (float)target->ox, cam->ofy + (float)target->oy);
     gl_Uniform2f(u_offset, cam->ofx, cam->ofy);
     gl_Uniform4f(u_tint, (float)list->tint[0], (float)list->tint[1], (float)list->tint[2], (float)list->tint[3]);
     gl_Uniform2f(u_clip_z, 1.0f, 65536.0f);
     gl_Uniform1i(u_objects, list->rules.objects != 0);
     gl_Uniform1i(u_zsf3, list->rules.zsf3);
-    gl_Uniform1f(u_surface, list->rules.objects ? 0.75f : 1.0f);
+    gl_Uniform1f(u_surface, list->rules.objects ? pc_widescreen_narrow : 1.0f);
     float cut_focus[4], cut_scale[4];
     cutaway_params(list, cam, cut_focus, cut_scale);
     gl_Uniform4fv(u_cut_focus, 1, cut_focus);

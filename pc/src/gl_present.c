@@ -6,6 +6,7 @@
  * fallback. */
 #define _POSIX_C_SOURCE 200809L
 #include "platform.h" /* pc_replace_file */
+extern float pc_widescreen_narrow; /* PsyX_GTE.cpp: X narrowed by (4/3) / the view's aspect (0.75: 16:9) */
 #include "gl_api.h"
 #include "dev_state.h"
 #include "light_shape.h"
@@ -1672,13 +1673,21 @@ static void update_view(int* out_w, int* out_h)
         /* 4:3, or 16:9 when the GTE projects widescreen (Hor+); movie frames
          * (24-bit display) are 4:3 pictures: pillarboxed in widescreen. */
         int wide = pc_gte_widescreen && !pc_display_rgb24;
-        int aw = wide ? 16 : 4, ah = wide ? 9 : 3;
-        view_h = area_w * ah / aw;
+        /* widescreen 2: the window's own shape (no wider than 21:9, no
+         * narrower than 16:9): the GTE narrows to it (pc_widescreen_narrow). */
+        if (pc_gte_widescreen == 2 && area_w > 0 && area_h > 0) {
+            float aspect = (float)area_w / (float)area_h;
+            aspect = aspect < 16.0f / 9.0f ? 16.0f / 9.0f : aspect > 21.0f / 9.0f ? 21.0f / 9.0f : aspect;
+            pc_widescreen_narrow = (4.0f / 3.0f) / aspect;
+        } else
+            pc_widescreen_narrow = 0.75f;
+        float aspect = wide ? (4.0f / 3.0f) / pc_widescreen_narrow : 4.0f / 3.0f;
+        view_h = (int)(area_w / aspect + 0.5f);
         if (view_h > area_h) {
             view_h = area_h;
-            view_w = area_h * aw / ah;
+            view_w = (int)(area_h * aspect + 0.5f);
         }
-        int base_w = wide ? 427 : 320;
+        int base_w = wide ? (int)(320.0f / pc_widescreen_narrow + 0.5f) : 320;
         if (pc_gl_aspect == 2 && view_w >= base_w && view_h >= 240) {
             int n = view_w / base_w < view_h / 240 ? view_w / base_w : view_h / 240;
             view_w = base_w * n;
@@ -1940,7 +1949,7 @@ void pc_gl_present(const uint16_t* vram, int x, int y, int w, int h)
                         gl_UniformMatrix3fv(u_normal_to_world, 1, GL_FALSE, transpose);
                         gl_Uniform3f(u_camera_translation, t[0], t[1], t[2]);
                     }
-                    gl_Uniform3f(u_projection, h * (pc_gte_widescreen ? 0.75f : 1.0f), h, 0);
+                    gl_Uniform3f(u_projection, h * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f), h, 0);
                     gl_Uniform2f(u_screen_offset, ox, oy);
                 }
                 gl_Uniform1i(u_light_count, count);

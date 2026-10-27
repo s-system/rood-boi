@@ -11,6 +11,7 @@
 // captured room and runs pc/tools/estimate_lights.py, which writes the old
 // one-line light format read here.
 #include <math.h>
+extern "C" float pc_widescreen_narrow; /* PsyX_GTE.cpp: X narrowed by (4/3) / the view's aspect (0.75: 16:9) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -479,7 +480,7 @@ bool camera(Camera& c)
 {
     if (!pc_scene_camera_get(c.r, c.t, &c.h, &c.ox, &c.oy) || pc_gl_view[2] <= 0 || pc_gl_display[2] <= 0)
         return false;
-    c.hx = c.h * (pc_gte_widescreen ? 0.75f : 1.0f);
+    c.hx = c.h * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f);
     for (int i = 0; i < 4; i++)
         c.view[i] = (float)pc_gl_view[i];
     c.display[0] = (float)pc_gl_display[2];

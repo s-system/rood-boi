@@ -293,7 +293,7 @@ static int probe_vk_surface(vk_descriptors* d, int x, int y, int w, int h, int r
     s->rect[0] = x, s->rect[1] = y, s->rect[2] = w, s->rect[3] = h;
     s->scale[0] = pc_hw_scale;
     s->gi_scale[0] = (float)gw / w, s->gi_scale[1] = (float)gh / h;
-    s->projection[0] = hh * (pc_gte_widescreen ? 0.75f : 1.0f), s->projection[1] = hh;
+    s->projection[0] = hh * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f), s->projection[1] = hh;
     s->screen_offset[0] = ox, s->screen_offset[1] = oy;
     for (int col = 0; col < 3; col++)
         for (int row = 0; row < 3; row++) {

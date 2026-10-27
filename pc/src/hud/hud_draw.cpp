@@ -12,6 +12,7 @@
 // outline inside its box. Prompt icons: button_prompts.h's images, outlined
 // the same way (tinted copies).
 #include "hud/hud_internal.h"
+extern "C" float pc_widescreen_narrow; /* PsyX_GTE.cpp: X narrowed by (4/3) / the view's aspect (0.75: 16:9) */
 #include "button_prompts.h"
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -87,14 +88,14 @@ struct Map {
             return vx + px / 320.0f * vw;
         float f = px / gw;
         if (wide)
-            f = anchor == 1 ? f * 0.75f : anchor == 2 ? 1.0f - (1.0f - f) * 0.75f : 0.5f + (f - 0.5f) * 0.75f;
+            f = anchor == 1 ? f * pc_widescreen_narrow : anchor == 2 ? 1.0f - (1.0f - f) * pc_widescreen_narrow : 0.5f + (f - 0.5f) * pc_widescreen_narrow;
         return vx + f * vw;
     }
     static bool square(int anchor) { return anchor == PC_HUD_ANCHOR_PICTURE || anchor == PC_HUD_ANCHOR_SCREEN; }
     float y(float py, int anchor) const { return vy + py / (square(anchor) ? 240.0f : gh) * vh; }
     // window pixels per game pixel down, and across (widescreen's 3/4 for the game's 2D)
     float down(int anchor) const { return vh / (square(anchor) ? 240.0f : gh); }
-    float across(int anchor) const { return square(anchor) ? down(anchor) : vw / gw * (wide ? 0.75f : 1.0f); }
+    float across(int anchor) const { return square(anchor) ? down(anchor) : vw / gw * (wide ? pc_widescreen_narrow : 1.0f); }
 };
 
 unsigned rgba(unsigned rgb, float a)

@@ -442,7 +442,7 @@ static const render_camera* vk_begin_draw(vk_draw_state* s, const draw_list* lis
     u->relief_fade[0] = pc_relief_aniso < 0 ? 0 : pc_relief_aniso, u->relief_fade[1] = pc_relief_footprint < 0 ? 0 : pc_relief_footprint;
     u->window = target->window;
     u->mask_set = target->mask_set;
-    float hx = cam->h * (list->camera.widescreen ? 0.75f : 1.0f);
+    float hx = cam->h * (list->camera.widescreen ? pc_widescreen_narrow : 1.0f);
     u->projection[0] = hx, u->projection[1] = cam->h;
     u->projection[2] = cam->ofx + (float)target->ox, u->projection[3] = cam->ofy + (float)target->oy;
     u->offset[0] = cam->ofx, u->offset[1] = cam->ofy;
@@ -451,7 +451,7 @@ static const render_camera* vk_begin_draw(vk_draw_state* s, const draw_list* lis
     u->clip_z[0] = 1.0f, u->clip_z[1] = 65536.0f;
     u->objects = list->rules.objects != 0;
     u->zsf3 = list->rules.zsf3;
-    u->surface = list->rules.objects ? 0.75f : 1.0f;
+    u->surface = list->rules.objects ? pc_widescreen_narrow : 1.0f;
     cutaway_params(list, cam, u->cut_focus, u->cut_scale);
     occlusion_draw occl;
     occlusion_params(list, cam, target->t, &occl);

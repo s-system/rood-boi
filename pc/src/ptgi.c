@@ -18,6 +18,7 @@
  * indirect light without it. */
 #define _POSIX_C_SOURCE 200809L
 #include "gl_api.h"
+extern float pc_widescreen_narrow; /* PsyX_GTE.cpp: X narrowed by (4/3) / the view's aspect (0.75: 16:9) */
 #include "scene_capture.h"
 #include <math.h>
 #include <stddef.h>
@@ -2046,7 +2047,7 @@ GLuint pc_gi_update(int x, int y, int w, int h)
     cadence_since = 0;
     ++cadence_traced;
     cadence_mark(1);
-    float hx = hh * (pc_gte_widescreen ? 0.75f : 1.0f);
+    float hx = hh * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f);
     GLuint normal, albedo;
     pc_hw_gbuffer(&normal, &albedo);
     /* Surfaces from the G-buffer. */
@@ -2142,7 +2143,7 @@ int pc_gi_probe_world(const float p[3], float out[8], float uv[2])
         v[i] = r[i][0] * p[0] + r[i][1] * p[1] + r[i][2] * p[2] + t[i];
     if (v[2] < 1.0f)
         return 0;
-    float hx = hh * (pc_gte_widescreen ? 0.75f : 1.0f);
+    float hx = hh * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f);
     uv[0] = (ox + hx * v[0] / v[2]) / (float)gi_display_size[0];
     uv[1] = (oy + hh * v[1] / v[2]) / (float)gi_display_size[1];
     return pc_gi_probe(uv[0], uv[1], out);

@@ -50,10 +50,11 @@ static const Button buttons[] = {
     { CIRCLE, -0.95f, 2.05f, 0.62f, "", true },
     { CROSS, -2.1f, 0.9f, 0.62f, "", true },
     { SQUARE, -3.25f, 2.05f, 0.62f, "", true },
-    { L2, 1.3f, -0.7f, 0.55f, "L2", false },
-    { L1, 1.3f, -1.95f, 0.55f, "L1", false },
-    { R2, -1.3f, -0.7f, 0.55f, "R2", false },
-    { R1, -1.3f, -1.95f, 0.55f, "R1", false },
+    /* (below the HUD's top corners: the life bars and the minimap) */
+    { L2, 1.3f, -2.3f, 0.55f, "L2", false },
+    { L1, 1.3f, -3.55f, 0.55f, "L1", false },
+    { R2, -1.3f, -2.3f, 0.55f, "R2", false },
+    { R1, -1.3f, -3.55f, 0.55f, "R1", false },
     { SELECT, -100.0f, 0.55f, 0.42f, "SELECT", false }, /* (x: beside the centre, see centre_x) */
     { START, 100.0f, 0.55f, 0.42f, "START", false },
 };

@@ -41,6 +41,7 @@
  * gameplay_walls 0. The ray-traced scene already holds every group. */
 #define _POSIX_C_SOURCE 200809L
 #include "gameplay_walls.h"
+extern float pc_widescreen_narrow; /* PsyX_GTE.cpp: X narrowed by (4/3) / the view's aspect (0.75: 16:9) */
 #include "dev_state.h"
 #include "room_editor.h"
 #include "scene_capture.h"
@@ -296,7 +297,7 @@ static int game_camera(view_t* v)
         v->t[a] = (float)view->t[a];
     }
     v->h = (float)(CFC2(26) & 0xffff);
-    v->hx = v->h * (pc_gte_widescreen ? 0.75f : 1.0f);
+    v->hx = v->h * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f);
     /* The grid's origin relative to the projection centre: the game's
      * frames are 320 x 240 around it (widescreen narrows hx instead). */
     v->ox = -160, v->oy = -120;

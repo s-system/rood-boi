@@ -45,11 +45,12 @@ enum { PC_ANCHOR_CENTRE = 0x10, PC_ANCHOR_LEFT_EDGE = 0x11, PC_ANCHOR_RIGHT_EDGE
  * nothing more: no edge extension, no cover or backdrop guesses, no side
  * paint (gpu_hw.c's heuristics are for the game's own 2D). */
 #define PC_ANCHOR_EXACT 0x20
-/* The 4:3 screen's X range widened to the 16:9 view, for culling tests on
- * un-narrowed screen X (PC_GTE_UNNARROWED projections): 320 * (4/3 - 1) / 2
- * = 53.3 more pixels each side in widescreen, 0 otherwise. */
+/* The 4:3 screen's X range widened to the wide view, for culling tests on
+ * un-narrowed screen X (PC_GTE_UNNARROWED projections): 160 / narrow - 160
+ * more pixels each side in widescreen (54 for 16:9), 0 otherwise. */
 extern int pc_gte_widescreen;
-#define PC_WIDESCREEN_MARGIN (pc_gte_widescreen ? 54 : 0)
+extern float pc_widescreen_narrow; /* PsyX_GTE.cpp: (4/3) / the view's aspect */
+#define PC_WIDESCREEN_MARGIN (pc_gte_widescreen ? (int)(160.0f / pc_widescreen_narrow - 159.01f) : 0)
 #define PC_GTE_UNNARROWED(statement) \
     do { \
         ++pc_gte_anchored; \

@@ -2,6 +2,7 @@
 // the room's emitters (lighting items, their assets resolved), the frame the
 // renderers draw, OpenGL's CPU path, RPC particles.
 #include "particles.h"
+extern "C" float pc_widescreen_narrow; /* PsyX_GTE.cpp: X narrowed by (4/3) / the view's aspect (0.75: 16:9) */
 #include "particles_internal.h"
 
 #include <math.h>
@@ -284,7 +285,7 @@ bool gather(Frame& f, int w, int h)
             g.rotation[row][k] = r[row][k];
         g.rotation[row][3] = tr[row];
     }
-    g.projection[0] = hh * (pc_gte_widescreen ? 0.75f : 1.0f), g.projection[1] = hh, g.projection[2] = ox, g.projection[3] = oy;
+    g.projection[0] = hh * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f), g.projection[1] = hh, g.projection[2] = ox, g.projection[3] = oy;
     pc_env_gpu env;
     static_assert(sizeof env == sizeof g.env, "pc_particles_gpu env: pc_env_gpu");
     pc_env_gpu_get(&env);

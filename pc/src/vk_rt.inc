@@ -1396,7 +1396,7 @@ int pc_vk_gi_update(int x, int y, int w, int h, int replay)
     int gw = (int)(w * res + 0.5f), gh = (int)(h * res + 0.5f);
     gi_display_size[0] = w, gi_display_size[1] = h; /* pc_gi_probe_world (ptgi.c) */
     vrt_images(gw, gh);
-    float hx = hh * (pc_gte_widescreen ? 0.75f : 1.0f);
+    float hx = hh * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f);
     /* Surfaces from the G-buffer. */
     const vk_target* target = replay ? &vk_hw.replay : &vk_hw.live;
     vk_slice ubo = vk_arena(sizeof(vrt_surface_ubo), vk.properties.limits.minUniformBufferOffsetAlignment);

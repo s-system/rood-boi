@@ -12,6 +12,7 @@
  * per texel. Mask-bit testing is not mirrored yet (reported once if used). */
 #define _POSIX_C_SOURCE 200809L
 #include "gl_api.h"
+extern float pc_widescreen_narrow; /* PsyX_GTE.cpp: X narrowed by (4/3) / the view's aspect (0.75: 16:9) */
 #include <stddef.h>
 #include <math.h>
 #include <stdint.h>
@@ -815,7 +816,7 @@ static int has_line_x;
 static float anchor_x(float x)
 {
     float edge = primitive_anchor == PC_ANCHOR_LEFT ? anchor_left : anchor_right;
-    return edge + (x - edge) * 0.75f;
+    return edge + (x - edge) * pc_widescreen_narrow;
 }
 
 /* Native lists hide the packets drawn after them where those are behind
@@ -2416,8 +2417,8 @@ int pc_hw_triangle(const int* xy, const int* uv, const int* rgb, unsigned code, 
     } else if ((compress || extend) && layout_enabled() && primitive_anchor != PC_ANCHOR_SCENE) {
         /* The drawing area compressed like its contents (an extended side
          * reaches the view's edge). */
-        float left = extend < 0 ? (float)clip[0] : centre + (clip[0] - centre) * 0.75f;
-        float right = extend > 0 ? (float)(clip[0] + clip[2]) : centre + (clip[0] + clip[2] - centre) * 0.75f;
+        float left = extend < 0 ? (float)clip[0] : centre + (clip[0] - centre) * pc_widescreen_narrow;
+        float right = extend > 0 ? (float)(clip[0] + clip[2]) : centre + (clip[0] + clip[2] - centre) * pc_widescreen_narrow;
         area[0] = (int)floorf(left + 0.001f);
         area[1] = clip[1];
         area[2] = (int)ceilf(right - 0.001f) - area[0];
@@ -2429,11 +2430,11 @@ int pc_hw_triangle(const int* xy, const int* uv, const int* rgb, unsigned code, 
     float extend_from = 0.0f, extend_scale = 1.0f;
     if (extend > 0) {
         float right = (float)(clip[0] + clip[2]);
-        extend_from = centre + (primitive_span[0] - centre) * 0.75f;
+        extend_from = centre + (primitive_span[0] - centre) * pc_widescreen_narrow;
         extend_scale = (right - extend_from) / (right - primitive_span[0]);
     } else if (extend < 0) {
         float left = (float)clip[0];
-        extend_from = centre + (primitive_span[1] - centre) * 0.75f;
+        extend_from = centre + (primitive_span[1] - centre) * pc_widescreen_narrow;
         extend_scale = (extend_from - left) / (primitive_span[1] - left);
     }
     int depth[3] = { 0, 0, 0 };
@@ -2550,7 +2551,7 @@ int pc_hw_triangle(const int* xy, const int* uv, const int* rgb, unsigned code, 
     float h, ofx, ofy, world[9];
     int has_world = 0;
     if (depth[0] > 0 && depth[1] > 0 && depth[2] > 0 && pc_scene_game_projection(&h, &ofx, &ofy)) {
-        float view[3][3], hx = h * (pc_gte_widescreen ? 0.75f : 1.0f);
+        float view[3][3], hx = h * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f);
         for (int i = 0; i < 3; i++) {
             view[i][2] = (float)depth[i];
             view[i][0] = (pos[i * 2] - clip[0] - ofx) * view[i][2] / hx;
@@ -2619,11 +2620,11 @@ int pc_hw_triangle(const int* xy, const int* uv, const int* rgb, unsigned code, 
     for (int i = 0; i < 3; i++) {
         hw_vertex* v = &batch[batch_count++];
         v->x = anchored ? (has_line_x ? line_x[i] : anchor_x(pos[i * 2]))
-            : compress   ? centre + (pos[i * 2] - centre) * 0.75f
+            : compress   ? centre + (pos[i * 2] - centre) * pc_widescreen_narrow
             : extend > 0 ? extend_from + (pos[i * 2] - primitive_span[0]) * extend_scale
             : extend < 0 ? extend_from - (primitive_span[1] - pos[i * 2]) * extend_scale
                          : pos[i * 2];
-        v->y = fill ? middle + (pos[i * 2 + 1] - middle) * (4.0f / 3.0f) : pos[i * 2 + 1];
+        v->y = fill ? middle + (pos[i * 2 + 1] - middle) / pc_widescreen_narrow : pos[i * 2 + 1];
         v->z = (float)depth[i];
         v->r = (uint8_t)rgb[i * 3];
         v->g = (uint8_t)rgb[i * 3 + 1];
@@ -3312,8 +3313,8 @@ static void side_paint_primitive(int x0, int y0, int x1, int y1, unsigned code, 
     if (y1 <= y0)
         return;
     float centre = clip[0] + clip[2] * 0.5f;
-    int inner_left = (int)ceilf(centre + (left - centre) * 0.75f - 0.001f);
-    int inner_right = (int)floorf(centre + (right - centre) * 0.75f + 0.001f);
+    int inner_left = (int)ceilf(centre + (left - centre) * pc_widescreen_narrow - 0.001f);
+    int inner_right = (int)floorf(centre + (right - centre) * pc_widescreen_narrow + 0.001f);
     int anchored = edge_anchored() && !primitive_cover;
     if (primitive_cover || primitive_narrowed || primitive_anchor == PC_ANCHOR_SCENE
         || (primitive_anchor == PC_ANCHOR_FILL && !primitive_cover)) {
@@ -5390,7 +5391,7 @@ static void replay_frame(const recording* a, const recording* b, float t)
     replay_h = a->h + (b->h - a->h) * t;
     replay_ofx = a->ofx + (b->ofx - a->ofx) * t;
     replay_ofy = a->ofy + (b->ofy - a->ofy) * t;
-    float hx = b->h * (b->widescreen ? 0.75f : 1.0f), replay_hx = replay_h * (b->widescreen ? 0.75f : 1.0f);
+    float hx = b->h * (b->widescreen ? pc_widescreen_narrow : 1.0f), replay_hx = replay_h * (b->widescreen ? pc_widescreen_narrow : 1.0f);
     /* Start from B over the displayed area and everything B drew, so
      * anything not replayed is B: images the game uploads straight into
      * the framebuffer (save thumbnails, icons) are not draw commands. */

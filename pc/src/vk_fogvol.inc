@@ -141,7 +141,7 @@ int pc_vk_fogvol_update(int x, int y, int w, int h, int replay, int traced)
     float r[3][3], tr[3], hh, ox, oy, inverse[3][3];
     if (!pc_scene_camera_get(r, tr, &hh, &ox, &oy) || !pc_scene_camera_inverse(inverse))
         return 0;
-    float hx = hh * (pc_gte_widescreen ? 0.75f : 1.0f);
+    float hx = hh * (pc_gte_widescreen ? pc_widescreen_narrow : 1.0f);
     float res = pc_fog_volume_resolution < 0.125f ? 0.125f : pc_fog_volume_resolution > 1 ? 1 : pc_fog_volume_resolution;
     int mw = (int)(w * pc_hw_scale * res + 0.5f), mh = (int)(h * pc_hw_scale * res + 0.5f);
     mw = mw < 1 ? 1 : mw, mh = mh < 1 ? 1 : mh;

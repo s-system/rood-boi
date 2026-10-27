@@ -18,6 +18,9 @@ GTERegisters gteRegs;
  * their screen positions up in this short-lived log. */
 extern "C" {
 int pc_gte_widescreen;
+/* The narrowing: (4/3) / the view's aspect, 3/4 for 16:9 (pc_gte_widescreen
+ * 1); widescreen 2 fits the window (the presenters set it from its shape). */
+float pc_widescreen_narrow = 0.75f;
 /* Set while the game projects a point it places 2D at (labels and icons over
  * characters, pc/src/widescreen.h): those projections are not narrowed (the
  * renderer compresses that 2D like the rest). ROOD_WIDESCREEN_LAYOUT=0
@@ -50,7 +53,7 @@ float pc_gte_view_ofx(void)
 	if (!pc_gte_widescreen)
 		return ofx;
 	float c = (float)rood_centre16() / 65536.0f;
-	return c + (ofx - c) * 0.75f;
+	return c + (ofx - c) * pc_widescreen_narrow;
 }
 /* 256K slots, probed sixteen deep (a room re-projects each shared vertex for
  * every polygon using it, so a frame logs many entries per pixel; a shallower
@@ -128,7 +131,7 @@ static void rood_record_projection(int sx, int sy, int sz)
 	rood_projected_precise[s][0] = rood_last_precise[0];
 	rood_projected_precise[s][1] = rood_last_precise[1];
 	/* (OFX as the scene camera reports it, pc_gte_view_ofx, when narrowed.) */
-	rood_projected_view[s][0] = rood_narrow() ? (int)(rood_centre16() + ((long long)C2_OFX - rood_centre16()) * 3 / 4) : C2_OFX;
+	rood_projected_view[s][0] = rood_narrow() ? (int)(rood_centre16() + (long long)(((long long)C2_OFX - rood_centre16()) * (double)pc_widescreen_narrow)) : C2_OFX;
 	rood_projected_view[s][1] = C2_OFY;
 	rood_projected_view[s][2] = C2_H;
 	rood_projected_caller[s] = pc_gte_caller;
@@ -598,7 +601,7 @@ int GTE_RotTransPers(int idx, int lm)
 		long long sx = (long long)C2_OFX + (long long)C2_IR1 * h_over_sz3;
 		if (rood_narrow()) {
 			long long c = rood_centre16();
-			sx = c + (sx - c) * 3 / 4; /* ROOD: 16:9 Hor+ */
+			sx = c + (int)((sx - c) * pc_widescreen_narrow); /* ROOD: Hor+ (3/4: 16:9) */
 		}
 		C2_SX2 = Lm_G1(F(sx) >> 16);
 	}
@@ -608,7 +611,7 @@ int GTE_RotTransPers(int idx, int lm)
 		float x = (float)C2_OFX / 65536.0f + (float)C2_IR1 * (float)C2_H / z;
 		if (rood_narrow()) {
 			float c = (float)rood_centre16() / 65536.0f;
-			x = c + (x - c) * 0.75f;
+			x = c + (x - c) * pc_widescreen_narrow;
 		}
 		rood_last_precise[0] = x;
 		rood_last_precise[1] = (float)C2_OFY / 65536.0f + (float)C2_IR2 * (float)C2_H / z;

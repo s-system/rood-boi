@@ -855,13 +855,13 @@ static void ios_files(void)
         symlink(from, to);
     }
     chdir(home);
-    /* The iPhone's defaults (16:9, smoothed textures; for its GPU and battery:
+    /* The iPhone's defaults (the whole screen's width: widescreen 2, smoothed textures; for its GPU and battery:
      * no MSAA, the internal resolution at 2x that MetalFX enlarges, the Low
      * lighting preset). A file from an earlier default set (no marker of
      * this one) gets these keys replaced; the player's other settings stay. */
-    static const char* const keys[] = { "widescreen 1", "smooth_textures 1", "subpixel 1", "perspective_textures 1",
+    static const char* const keys[] = { "widescreen 2", "smooth_textures 1", "subpixel 1", "perspective_textures 1",
         "aa off", "internal_resolution 2", "lighting_preset low" };
-    static const char marker[] = "pc/user/.ios_defaults_2";
+    static const char marker[] = "pc/user/.ios_defaults_3"; /* 3: widescreen 2, the screen's own shape */
     FILE* settings = fopen(marker, "r");
     if (settings)
         fclose(settings);
