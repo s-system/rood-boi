@@ -82,6 +82,21 @@ void pc_window_wait_fraction(int k, int n)
         return; /* late already: present now */
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, NULL);
 }
+/* The window at the display's full pixel density (Retina): every present
+ * pass then shades 4x the pixels. ROOD_HIDPI=1/0; by default on except on
+ * macOS, whose integrated GPUs cannot light a Retina window per pixel at
+ * 60 Hz (the system scales the window up). */
+int pc_window_high_density(void)
+{
+    const char* v = getenv("ROOD_HIDPI");
+    if (v && *v)
+        return *v != '0';
+#ifdef __APPLE__
+    return 0;
+#else
+    return 1;
+#endif
+}
 /* Fast mode (no vsync pacing; tests): the GI cadence budget (ptgi.c). */
 int pc_window_fast(void) { return fast; }
 /* The window an engine reload keeps (engine_reload.c): the next library's

@@ -1002,6 +1002,7 @@ extern const uint16_t* pc_native_vram(void);
 
 extern SDL_Window* pc_window_create(SDL_PropertiesID props);
 extern void pc_window_place(SDL_PropertiesID props, int width, int height); /* boot_window.c */
+extern int pc_window_high_density(void); /* boot_window.c: ROOD_HIDPI */
 extern int pc_vsync_get(void);                                              /* boot_window.c: settings vsync */
 /* An engine reload (engine_reload.c): the context goes with every GL object
  * (nothing is shared), the window stays for the next library. */
@@ -1040,7 +1041,7 @@ SDL_Window* pc_gl_create_window(const char* title, int width, int height)
     pc_window_place(props, width, height); /* boot_window.c: a remembered place, else (40, 40) */
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_OPENGL_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
-    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, pc_window_high_density());
     SDL_Window* win = pc_window_create(props); /* boot_window.c: the window kept across an engine reload */
     SDL_DestroyProperties(props);
     if (!win) {

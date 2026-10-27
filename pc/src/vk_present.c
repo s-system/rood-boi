@@ -337,6 +337,7 @@ static int make_pipelines(void)
 
 extern SDL_Window* pc_window_create(SDL_PropertiesID props); /* boot_window.c: kept across an engine reload */
 extern void pc_window_place(SDL_PropertiesID props, int width, int height); /* boot_window.c */
+extern int pc_window_high_density(void); /* boot_window.c: ROOD_HIDPI */
 /* An engine reload (engine_reload.c): the device and everything on it, the
  * surface and the instance go; the window stays for the next library. */
 void pc_vk_shutdown(void)
@@ -359,7 +360,7 @@ SDL_Window* pc_vk_create_window(const char* title, int width, int height)
     pc_window_place(props, width, height); /* boot_window.c: a remembered place, else (40, 40) */
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
-    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, pc_window_high_density());
     SDL_Window* win = pc_window_create(props);
     SDL_DestroyProperties(props);
     if (!win) {

@@ -20,10 +20,26 @@
 #define MAP_NORESERVE 0
 #endif
 #ifndef SOCK_NONBLOCK
-#define SOCK_NONBLOCK 0 /* the developer RPC socket blocks on macOS */
-#endif
-#ifndef SOCK_CLOEXEC
-#define SOCK_CLOEXEC 0
+/* Linux's socket type flags: applied with fcntl (the developer RPC's socket
+ * must not block the game loop). */
+#define SOCK_NONBLOCK 0x10000000
+#define SOCK_CLOEXEC 0x20000000
+#ifndef __cplusplus /* the sockets are C's (dev_rpc.c); <fcntl.h>'s open() clashes with C++ host names */
+#include <fcntl.h>
+static inline int rood_socket_flags(int fd, int flags)
+{
+    if (fd >= 0 && (flags & SOCK_NONBLOCK))
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    if (fd >= 0 && (flags & SOCK_CLOEXEC))
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+}
+static inline int rood_socket(int domain, int type, int protocol)
+{
+    return rood_socket_flags(socket(domain, type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC), protocol), type);
+}
+#define socket(domain, type, protocol) rood_socket(domain, type, protocol)
+#endif /* !__cplusplus */
 #endif
 #ifndef TIMER_ABSTIME
 #define TIMER_ABSTIME 1
@@ -47,10 +63,11 @@ static inline int rood_clock_nanosleep(clockid_t clock, int flags, const struct 
 #endif
 #ifndef SOCK_NONBLOCK_ACCEPT4
 #define SOCK_NONBLOCK_ACCEPT4
-/* accept4: Linux only; the flags are 0 here (SOCK_NONBLOCK, SOCK_CLOEXEC). */
+#ifndef __cplusplus
+/* accept4: Linux only. */
 static inline int accept4(int fd, struct sockaddr* address, socklen_t* length, int flags)
 {
-    (void)flags;
-    return accept(fd, address, length);
+    return rood_socket_flags(accept(fd, address, length), flags);
 }
+#endif
 #endif
