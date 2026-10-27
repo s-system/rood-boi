@@ -1368,8 +1368,9 @@ void func_800AFDE8(int offset, SVECTOR* value, int rotation)
     int frame = scratch->first;
     int flags, count, packed;
 #ifdef ROOD_PC_LP64
-    /* The base is the animation's guest address (a 32-bit word). */
-    data += (u_int)(offset + *(u_int*)psx_get(scratch->data));
+    /* The base is the animation's guest address (a 32-bit word), added in
+     * 32 bits: a zero offset in pad would be a null pointer otherwise. */
+    data = psx_to_ptr(u_char*, (u_int)(u_short)value->pad + (u_int)(offset + *(u_int*)psx_get(scratch->data)));
 #else
     data += (int)((u_char*)(offset + (int)*psx_get(scratch->data)));
 #endif

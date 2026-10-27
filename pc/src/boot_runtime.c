@@ -1526,6 +1526,10 @@ int func_800E45B4(void)
 extern char __start_rood_game_text[] __attribute__((weak)), __stop_rood_game_text[] __attribute__((weak));
 void pc_require_native_callback(unsigned address, const char* context, unsigned opcode)
 {
+    /* With a guest base the code is not in the Linux layout's low range, and
+     * the tables hold native pointers whole: nothing to check here. */
+    if (ROOD_GUEST_BASE)
+        return;
     int pinned = __start_rood_game_text && address >= (uintptr_t)__start_rood_game_text
               && address < (uintptr_t)__stop_rood_game_text;
     if (!pinned && (address < 0x00400000 || address >= 0x01000000)) {
