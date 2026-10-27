@@ -91,6 +91,12 @@ typedef struct {
     int has_depth;
     float blend_constant; /* vk_core.c's: alpha 0.25 for PS1 mode 3 (B + F/4), else 0.5 */
 } mtl_pipeline;
+/* An acceleration structure (vk_rt.inc; see "ray tracing" below). */
+typedef struct mtl_structure {
+    id<MTLAccelerationStructure> structure;
+    int top;
+    NSMutableArray* bottoms; /* a TLAS's BLASes (residency) */
+} mtl_structure;
 typedef struct {
     CAMetalLayer* layer;
     SDL_MetalView view;
@@ -176,6 +182,7 @@ typedef struct {
     id resource;       /* texture, sampler, buffer or acceleration structure */
     VkDeviceSize offset; /* buffers */
     int set;
+    NSArray* bottoms;  /* a TLAS's BLASes: declared with it */
 } binding_slot;
 typedef struct {
     mtl_pipeline* pipeline;
@@ -645,6 +652,38 @@ void vk_frame_submit(VkSemaphore wait, VkPipelineStageFlags wait_stage, VkSemaph
 
 /* ---- memory ---- */
 
+/* Buffers by GPU address: ray tracing passes geometry, instances and
+ * scratch memory as device addresses (vk_rt.inc); a build needs the buffer. */
+static mtl_buffer** addressed;
+static int addressed_count, addressed_capacity;
+static void register_address(mtl_buffer* m)
+{
+    if (addressed_count == addressed_capacity) {
+        addressed_capacity = addressed_capacity ? addressed_capacity * 2 : 256;
+        addressed = realloc(addressed, (size_t)addressed_capacity * sizeof *addressed);
+    }
+    addressed[addressed_count++] = m;
+}
+static void unregister_address(mtl_buffer* m)
+{
+    for (int i = addressed_count; i-- > 0;)
+        if (addressed[i] == m) {
+            addressed[i] = addressed[--addressed_count];
+            return;
+        }
+}
+static mtl_buffer* buffer_at(VkDeviceAddress address, NSUInteger* offset)
+{
+    for (int i = addressed_count; i-- > 0;) {
+        uint64_t base = addressed[i]->buffer.gpuAddress;
+        if (address >= base && address < base + addressed[i]->buffer.length) {
+            *offset = (NSUInteger)(address - base);
+            return addressed[i];
+        }
+    }
+    *offset = 0;
+    return NULL;
+}
 int vk_buffer_create(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage, int host)
 {
     (void)usage;
@@ -662,6 +701,7 @@ int vk_buffer_create(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage, 
     mtl_buffer* m = calloc(1, sizeof *m);
     m->buffer = buffer;
     m->size = size;
+    register_address(m);
     b->buffer = (VkBuffer)m;
     b->memory = (VkDeviceMemory)(uintptr_t)1;
     b->size = size;
@@ -673,6 +713,7 @@ void vk_buffer_destroy(vk_buffer* b)
 {
     if (b->buffer) {
         mtl_buffer* m = (mtl_buffer*)b->buffer;
+        unregister_address(m);
         [m->buffer release];
         free(m);
     }
@@ -1033,6 +1074,10 @@ int vk_core_init(const char* const* instance_extensions, uint32_t extension_coun
     if (!load_library())
         return 0;
     queue = [device newCommandQueue];
+    /* Metal ray tracing (Apple GPUs from the M3/A17 in hardware); ROOD_VK_RT=0 keeps it off, as on Vulkan. */
+    const char* rt = getenv("ROOD_VK_RT");
+    vk.ray_query = device.supportsRaytracing && !(rt && *rt == '0');
+    vk.scratch_alignment = 256;
     install_entry_points();
     vk.instance = (VkInstance)(uintptr_t)1;
     vk.gpu = (VkPhysicalDevice)(uintptr_t)1;
@@ -1048,7 +1093,6 @@ int vk_core_init(const char* const* instance_extensions, uint32_t extension_coun
     vk.properties.limits.maxPerStageDescriptorSamplers = 2048; /* argument buffers (tier 2) */
     vk.properties.limits.timestampPeriod = 1.0f;
     vk.timestamp_period = 1.0f;
-    vk.ray_query = 0; /* Metal ray tracing: not yet (vk_rt.inc's passes stay off) */
     vk.geometry_shader = 0;
     vk.depth_format = VK_FORMAT_D32_SFLOAT;
     vk.msaa_counts = 1;
@@ -1338,6 +1382,7 @@ static void push_descriptor_set(VkCommandBuffer cmd, VkPipelineBindPoint point, 
     bind_point* bp = point == VK_PIPELINE_BIND_POINT_COMPUTE ? &rec.kernel : &rec.graphics;
     for (int i = 0; i < 32; i++) {
         [bp->slots[i].resource release];
+        [bp->slots[i].bottoms release];
         bp->slots[i] = (binding_slot){ 0 };
     }
     /* Combined image samplers: the texture at the binding's texture id, the
@@ -1373,6 +1418,14 @@ static void push_descriptor_set(VkCommandBuffer cmd, VkPipelineBindPoint point, 
             mtl_buffer* b = (mtl_buffer*)w->pBufferInfo->buffer;
             s->resource = b ? [b->buffer retain] : nil;
             s->offset = w->pBufferInfo->offset;
+            break;
+        }
+        case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: {
+            const VkWriteDescriptorSetAccelerationStructureKHR* as = w->pNext;
+            mtl_structure* st = as && as->accelerationStructureCount ? (mtl_structure*)as->pAccelerationStructures[0] : NULL;
+            s->resource = st ? [st->structure retain] : nil;
+            [s->bottoms release];
+            s->bottoms = st && st->bottoms ? [st->bottoms retain] : nil;
             break;
         }
         default:
@@ -1420,6 +1473,17 @@ static vk_slice arguments_for(const mtl_shader_info* info, int compute, id encod
             id<MTLBuffer> b = resource;
             words[a->id] = b.gpuAddress + s->offset;
             used = b;
+        } else if (a->kind == MTL_ARG_STRUCTURE) {
+            id<MTLAccelerationStructure> st = resource;
+            MTLResourceID rid = st.gpuResourceID;
+            memcpy(&words[a->id], &rid, 8);
+            used = st;
+            for (id<MTLAccelerationStructure> bottom in s->bottoms) {
+                if (!compute)
+                    [(id<MTLRenderCommandEncoder>)encoder useResource:bottom usage:MTLResourceUsageRead stages:stages];
+                else
+                    [(id<MTLComputeCommandEncoder>)encoder useResource:bottom usage:MTLResourceUsageRead];
+            }
         }
         if (used) {
             if (!compute)
@@ -2001,6 +2065,163 @@ static VkResult queue_present(VkQueue q, const VkPresentInfoKHR* info)
     return VK_SUCCESS;
 }
 
+/* ---- ray tracing (vk_rt.inc: ray queries over a TLAS of room and mover BLASes) ----
+ * A Vulkan acceleration structure is a Metal one; its "device address" (an
+ * instance's reference) is the handle itself. A TLAS build turns Vulkan's
+ * instances into Metal's (user ids: gl_InstanceCustomIndex) and keeps the
+ * BLASes it references, declared with it wherever it is bound. */
+static MTLAccelerationStructureDescriptor* structure_descriptor(const VkAccelerationStructureBuildGeometryInfoKHR* info,
+    uint32_t count, int bind, NSMutableArray* bottoms, mtl_buffer** instance_out, NSUInteger* instance_offset)
+{
+    const VkAccelerationStructureGeometryKHR* g = info->pGeometries ? info->pGeometries : *info->ppGeometries;
+    if (info->type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR) {
+        MTLAccelerationStructureTriangleGeometryDescriptor* t = [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+        t.triangleCount = count;
+        t.opaque = (g->flags & VK_GEOMETRY_OPAQUE_BIT_KHR) != 0;
+        t.vertexStride = (NSUInteger)g->geometry.triangles.vertexStride;
+        t.vertexFormat = MTLAttributeFormatFloat3;
+        t.indexType = g->geometry.triangles.indexType == VK_INDEX_TYPE_UINT16 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+        if (bind) {
+            NSUInteger off = 0;
+            mtl_buffer* v = buffer_at(g->geometry.triangles.vertexData.deviceAddress, &off);
+            t.vertexBuffer = v ? v->buffer : nil;
+            t.vertexBufferOffset = off;
+            mtl_buffer* ix = buffer_at(g->geometry.triangles.indexData.deviceAddress, &off);
+            t.indexBuffer = ix ? ix->buffer : nil;
+            t.indexBufferOffset = off;
+        }
+        MTLPrimitiveAccelerationStructureDescriptor* d = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+        d.geometryDescriptors = @[ t ];
+        if (info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR)
+            d.usage = MTLAccelerationStructureUsageRefit;
+        return d;
+    }
+    MTLInstanceAccelerationStructureDescriptor* d = [MTLInstanceAccelerationStructureDescriptor descriptor];
+    d.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeUserID;
+    d.instanceCount = count;
+    if (bind && count) {
+        /* Vulkan's instances (CPU-visible arena) -> Metal's, in a new arena slice. */
+        NSUInteger off = 0;
+        mtl_buffer* src = buffer_at(g->geometry.instances.data.deviceAddress, &off);
+        const VkAccelerationStructureInstanceKHR* in = src ? (const void*)((char*)src->buffer.contents + off) : NULL;
+        vk_slice slice = vk_arena((VkDeviceSize)count * sizeof(MTLAccelerationStructureUserIDInstanceDescriptor), 16);
+        MTLAccelerationStructureUserIDInstanceDescriptor* out = slice.data;
+        for (uint32_t i = 0; in && out && i < count; i++) {
+            mtl_structure* bottom = (mtl_structure*)(uintptr_t)in[i].accelerationStructureReference;
+            NSUInteger index = [bottoms indexOfObjectIdenticalTo:bottom->structure];
+            if (index == NSNotFound) {
+                index = bottoms.count;
+                [bottoms addObject:bottom->structure];
+            }
+            memset(&out[i], 0, sizeof out[i]);
+            for (int c = 0; c < 4; c++)
+                for (int r = 0; r < 3; r++)
+                    out[i].transformationMatrix.columns[c].elements[r] = in[i].transform.matrix[r][c];
+            out[i].mask = in[i].mask;
+            out[i].userID = in[i].instanceCustomIndex;
+            out[i].accelerationStructureIndex = (uint32_t)index;
+            out[i].intersectionFunctionTableOffset = 0;
+            out[i].options = ((in[i].flags & VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR)
+                                     ? MTLAccelerationStructureInstanceOptionDisableTriangleCulling : 0)
+                           | ((in[i].flags & VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR)
+                                     ? MTLAccelerationStructureInstanceOptionOpaque : 0)
+                           | ((in[i].flags & VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR)
+                                     ? MTLAccelerationStructureInstanceOptionNonOpaque : 0);
+        }
+        d.instanceDescriptorBuffer = ((mtl_buffer*)slice.buffer)->buffer;
+        d.instanceDescriptorBufferOffset = (NSUInteger)slice.offset;
+        d.instancedAccelerationStructures = bottoms;
+        if (instance_out)
+            *instance_out = (mtl_buffer*)slice.buffer, *instance_offset = (NSUInteger)slice.offset;
+    }
+    return d;
+}
+static void structure_sizes(VkDevice d, VkAccelerationStructureBuildTypeKHR type,
+    const VkAccelerationStructureBuildGeometryInfoKHR* info, const uint32_t* counts,
+    VkAccelerationStructureBuildSizesInfoKHR* sizes)
+{
+    (void)d, (void)type;
+    @autoreleasepool {
+        MTLAccelerationStructureDescriptor* desc = structure_descriptor(info, counts[0], 0, nil, NULL, NULL);
+        MTLAccelerationStructureSizes s = [device accelerationStructureSizesWithDescriptor:desc];
+        sizes->accelerationStructureSize = s.accelerationStructureSize;
+        sizes->buildScratchSize = s.buildScratchBufferSize;
+        sizes->updateScratchSize = s.refitScratchBufferSize;
+    }
+}
+static VkResult create_structure(VkDevice d, const VkAccelerationStructureCreateInfoKHR* info,
+    const VkAllocationCallbacks* a, VkAccelerationStructureKHR* out)
+{
+    (void)d, (void)a;
+    mtl_structure* s = calloc(1, sizeof *s);
+    s->structure = [device newAccelerationStructureWithSize:(NSUInteger)info->size];
+    s->top = info->type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    if (!s->structure) {
+        free(s);
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    *out = (VkAccelerationStructureKHR)s;
+    return VK_SUCCESS;
+}
+static void destroy_structure(VkDevice d, VkAccelerationStructureKHR handle, const VkAllocationCallbacks* a)
+{
+    (void)d, (void)a;
+    mtl_structure* s = (mtl_structure*)handle;
+    if (!s)
+        return;
+    [s->structure release];
+    [s->bottoms release];
+    free(s);
+}
+static VkDeviceAddress structure_address(VkDevice d, const VkAccelerationStructureDeviceAddressInfoKHR* info)
+{
+    (void)d;
+    return (VkDeviceAddress)(uintptr_t)info->accelerationStructure;
+}
+static void cmd_build_structures(VkCommandBuffer cmd, uint32_t count, const VkAccelerationStructureBuildGeometryInfoKHR* infos,
+    const VkAccelerationStructureBuildRangeInfoKHR* const* ranges)
+{
+    (void)cmd;
+    if (rendering)
+        vk_end_rendering();
+    end_encoder();
+    vk_cmd();
+    id<MTLAccelerationStructureCommandEncoder> e = [rec.cb accelerationStructureCommandEncoder];
+    for (uint32_t i = 0; i < count; i++) {
+        const VkAccelerationStructureBuildGeometryInfoKHR* info = &infos[i];
+        mtl_structure* dst = (mtl_structure*)info->dstAccelerationStructure;
+        mtl_structure* src = (mtl_structure*)info->srcAccelerationStructure;
+        NSMutableArray* bottoms = dst->top ? [[NSMutableArray alloc] init] : nil;
+        MTLAccelerationStructureDescriptor* desc = structure_descriptor(info, ranges[i][0].primitiveCount, 1, bottoms,
+            NULL, NULL);
+        NSUInteger scratch_offset = 0;
+        mtl_buffer* scratch = buffer_at(info->scratchData.deviceAddress, &scratch_offset);
+        if (!scratch) {
+            fprintf(stderr, "[mtl] an acceleration structure build without scratch memory\n");
+            [bottoms release];
+            continue;
+        }
+        if (dst->top) {
+            for (id<MTLAccelerationStructure> bottom in bottoms)
+                [e useResource:bottom usage:MTLResourceUsageRead];
+            [dst->bottoms release];
+            dst->bottoms = bottoms;
+        }
+        if (info->mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR && src)
+            [e refitAccelerationStructure:src->structure
+                               descriptor:desc
+                              destination:dst->structure
+                            scratchBuffer:scratch->buffer
+                      scratchBufferOffset:scratch_offset];
+        else
+            [e buildAccelerationStructure:dst->structure
+                               descriptor:desc
+                            scratchBuffer:scratch->buffer
+                      scratchBufferOffset:scratch_offset];
+    }
+    [e endEncoding];
+}
+
 static void install_entry_points(void)
 {
     vkCmdBindPipeline = cmd_bind_pipeline;
@@ -2047,6 +2268,13 @@ static void install_entry_points(void)
     vkGetSwapchainImagesKHR = swapchain_images;
     vkAcquireNextImageKHR = acquire_next_image;
     vkQueuePresentKHR = queue_present;
+    if (vk.ray_query) {
+        vkGetAccelerationStructureBuildSizesKHR = structure_sizes;
+        vkCreateAccelerationStructureKHR = create_structure;
+        vkDestroyAccelerationStructureKHR = destroy_structure;
+        vkGetAccelerationStructureDeviceAddressKHR = structure_address;
+        vkCmdBuildAccelerationStructuresKHR = cmd_build_structures;
+    }
 }
 
 /* ---- MetalFX (vk_present.c): the lit image magnified to the view ----
