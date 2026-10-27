@@ -64,7 +64,7 @@ int func_800E437C(short* from, short* to, int angle, unsigned distance)
 }
 
 /* A 32-bit guest word: the battle menu state block's address. */
-extern unsigned D_800EB9B8;
+extern unsigned long D_800EB9B8; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 extern MATRIX* func_800C085C(unsigned char*, int);
 extern MATRIX* RotMatrixYXZ_gte(SVECTOR*, MATRIX*);
 extern MATRIX* func_80041C68(MATRIX*, MATRIX*);

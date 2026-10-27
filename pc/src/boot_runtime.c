@@ -5,6 +5,9 @@
 #include "frame_cost.h" /* ROOD_PERF sections */
 #include <stdio.h>
 #include <stdint.h>
+#ifndef ROOD_GUEST_BASE
+#define ROOD_GUEST_BASE 0UL /* build_boot.py --guest-base; pc/src/psx_types.h */
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -350,12 +353,96 @@ static void pc_crash(int sig)
     signal(sig, SIG_DFL);
     raise(sig);
 }
+#ifndef _WIN32
+/* Faults also name the address touched (a guest address missing its base
+ * shows up here: pc/tools/guest_base.py). */
+static void pc_crash_at(int sig, siginfo_t* info, void* context)
+{
+    (void)context;
+    char line[64];
+    int len = snprintf(line, sizeof line, "[crash] fault address %p\n", info->si_addr);
+    write(2, line, len);
+    pc_crash(sig);
+}
+#endif
 /* psx_set() (pc/src/psx_types.h) was given a host pointer with no 4-byte
  * guest address: a PS1-layout field cannot hold it. Stop with the stack. */
 __attribute__((noreturn)) void pc_psx_bad_pointer(const void* pointer)
 {
     fprintf(stderr, "[lp64] %p has no guest address (psx_set on a PS1-layout field)\n", pointer);
     abort(); /* pc_crash prints the stack */
+}
+/* Code tokens (psx_types.h): with a guest base, native code is outside the
+ * guest window, so a function pointer the game keeps in a 4-byte field is
+ * stored as PSX_CODE_TOKEN + 4 * index into this table. A token is never
+ * released: the game's callbacks are a fixed, small set of functions. */
+#ifndef PSX_CODE_TOKEN
+#define PSX_CODE_TOKEN 0xF0000000u /* psx_types.h */
+#endif
+#ifdef __APPLE__
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
+#endif
+#define CODE_TOKENS 8192
+static uintptr_t code_tokens[CODE_TOKENS] __attribute__((section(".data.rood_host")));
+static uint32_t code_token_count __attribute__((section(".data.rood_host")));
+static int pc_is_code(uintptr_t p)
+{
+#ifdef __APPLE__
+    extern const struct mach_header_64 _mh_execute_header;
+    unsigned long size = 0;
+    uintptr_t text = (uintptr_t)getsectiondata(&_mh_execute_header, "__TEXT", "__text", &size);
+    return p >= text && p < text + size;
+#else
+    /* Every executable mapping (the pinned game code too, not only .text),
+     * read once from /proc/self/maps. */
+    static uintptr_t ranges[64][2];
+    static int count = -1;
+    if (count < 0) {
+        count = 0;
+        FILE* maps = fopen("/proc/self/maps", "r");
+        char line[512], perms[8];
+        unsigned long lo, hi;
+        while (maps && fgets(line, sizeof line, maps) && count < 64)
+            if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) == 3 && perms[2] == 'x') {
+                ranges[count][0] = lo;
+                ranges[count++][1] = hi;
+            }
+        if (maps)
+            fclose(maps);
+    }
+    for (int i = 0; i < count; i++)
+        if (p >= ranges[i][0] && p < ranges[i][1])
+            return 1;
+    return 0;
+#endif
+}
+uint32_t pc_psx_code_token(const void* code)
+{
+    uintptr_t p = (uintptr_t)code;
+    if (!pc_is_code(p)) {
+        /* Below 4 GB and not code: a guest address built without the base,
+         * as relocations do from a zero offset ((char*)0 + address). */
+        if (!(p >> 32))
+            return (uint32_t)p;
+        pc_psx_bad_pointer(code);
+    }
+    for (uint32_t i = 0; i < code_token_count; i++)
+        if (code_tokens[i] == p)
+            return PSX_CODE_TOKEN + 4 * i;
+    if (code_token_count == CODE_TOKENS) {
+        fprintf(stderr, "[lp64] code tokens: table full at %p\n", code);
+        abort();
+    }
+    code_tokens[code_token_count] = p;
+    return PSX_CODE_TOKEN + 4 * code_token_count++;
+}
+uintptr_t pc_psx_code_native(uint32_t token)
+{
+    uint32_t i = (token - PSX_CODE_TOKEN) / 4;
+    if (i >= code_token_count || token % 4)
+        return ROOD_GUEST_BASE | token; /* not a token: an address like any other */
+    return code_tokens[i];
 }
 /* The game's stack on 64 bits. The PS1's stack was guest RAM, and game code
  * keeps addresses of its locals in 4-byte fields (psx_ptr members, guest
@@ -417,9 +504,6 @@ static LONG WINAPI pc_exception(EXCEPTION_POINTERS* info)
  * the same; elsewhere (taken) only resuming in a new process is lost. Host
  * statics (.data.rood_host): a snapshot of this unit's state must not carry
  * another process's. */
-#ifndef ROOD_GUEST_BASE
-#define ROOD_GUEST_BASE 0UL /* build_boot.py --guest-base; pc/src/psx_types.h */
-#endif
 #define GAME_STACK_BASE 0x60000000u
 static char* game_stack __attribute__((section(".data.rood_host"))) = NULL;
 static int game_stack_fixed __attribute__((section(".data.rood_host"))) = 0;
@@ -559,7 +643,12 @@ int main(int argc, char** argv)
     signal(SIGUSR1, pc_dump_stack);
     signal(SIGBUS, pc_crash);
 #endif
+#ifdef _WIN32
     signal(SIGSEGV, pc_crash);
+#else
+    struct sigaction fault = { .sa_sigaction = pc_crash_at, .sa_flags = SA_SIGINFO };
+    sigaction(SIGSEGV, &fault, NULL);
+#endif
     signal(SIGFPE, pc_crash);
     signal(SIGILL, pc_crash);
     signal(SIGABRT, pc_crash); /* e.g. stack protector failures */

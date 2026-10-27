@@ -10,8 +10,9 @@ pointer direction changes.
 
 This pass finds every integer to pointer conversion in the unit with clang's
 JSON AST (the same input pc/tools/lp64_audit.py reads) and wraps its operand
-in __rood_guest_ptr(), which adds the base to a 32-bit address and leaves
-zero (null) and full 64-bit host pointers alone. Pointer to integer
+in __rood_guest_ptr(), which adds the base to a 32-bit address, maps a code
+token back to its function (psx_types.h), and leaves zero (null) and full
+64-bit host pointers alone. Pointer to integer
 truncations need no change.
 
 Usage: guest_base.py BASE UNIT.i [OUT.i]   (BASE e.g. 0x200000000)
@@ -23,9 +24,14 @@ from pathlib import Path
 
 TARGET = "x86_64-linux-gnu"
 PRELUDE = """\
+extern unsigned long pc_psx_code_native(unsigned int token);
 static __inline__ __attribute__((always_inline, unused)) unsigned long __rood_guest_ptr(unsigned long value)
 {
-    return (value >> 32) || !value ? value : value | %(base)#xUL;
+    if ((value >> 32) || !value)
+        return value;
+    if ((unsigned int)value >= 0xF0000000u) /* a code token: psx_types.h */
+        return pc_psx_code_native((unsigned int)value);
+    return value | %(base)#xUL;
 }
 """
 
@@ -66,9 +72,8 @@ WIDE = {"long", "unsigned long", "long int", "unsigned long int", "long long", "
 
 
 def is_wide(node):
-    """A 64-bit operand may hold a full host pointer; narrower ones hold a
-    guest address and are zero-extended (an int holding 0x80000000 is
-    negative and would sign-extend)."""
+    """A 64-bit operand may hold a full host pointer (kept for reference: the
+    conversion is the same either way)."""
     t = node.get("type", {})
     name = t.get("desugaredQualType", t.get("qualType", ""))
     name = name.replace("const ", "").replace("volatile ", "").strip()
@@ -97,8 +102,10 @@ def rewrite(data, base):
     # Insert from the end so earlier offsets stay valid; nested spans are
     # fine because each edit only adds text at two points. At one offset the
     # closing text of an inner span goes before the opening of the next.
-    opening = lambda wide, implicit: ("(void*)" if implicit else "") + "__rood_guest_ptr((unsigned long)" \
-        + ("" if wide else "(unsigned int)") + "("
+    # The operand converts to unsigned long as C converts it to a pointer:
+    # a signed int sign-extends ((void*)-1 stays MAP_FAILED), an unsigned
+    # one zero-extends; only values whose high 32 bits are zero get the base.
+    opening = lambda wide, implicit: ("(void*)" if implicit else "") + "__rood_guest_ptr((unsigned long)("
     # Among edits at one offset, the one applied last ends up leftmost:
     # outer spans open left of inner ones and close right of them.
     edits = sorted([(b, 1, -e, opening(w, i)) for b, e, w, i in spans] + [(e, 0, -b, "))") for b, e, _, _ in spans],

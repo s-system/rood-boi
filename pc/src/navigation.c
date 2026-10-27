@@ -14,8 +14,9 @@ extern unsigned short* func_8008D438(unsigned, unsigned, int);
 extern int func_8008DC7C(int, int);
 /* Guest words at 0x800F58xx hold 32-bit guest addresses: stored as words so
  * a write never spills into the next one (the game declares D_800F58C0 int). */
-extern unsigned D_800F58C0, D_800F58D8, D_800F58C8, D_800F5908, D_800F5910, D_800F58CC,
-    D_800F58BC, D_800F58B8, D_800F58D0;
+extern unsigned D_800F58C0, D_800F5908, D_800F58CC;
+extern unsigned long D_800F58D8, D_800F58C8, D_800F5910, D_800F58BC, D_800F58B8,
+    D_800F58D0; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 extern void pc_unimplemented(const char*);
 
 int func_800E71DC(int x, int z)
@@ -63,18 +64,18 @@ void func_800E6F9C(void)
     unsigned address = func_8008B6FC();
     unsigned char* section = psx_to_ptr(unsigned char*, address);
     D_800F58C0 = address;
-    D_800F58D8 = address + 0x400;
-    D_800F58C8 = address + 0x440;
+    D_800F58D8 = psx_guest_(address + 0x400);
+    D_800F58C8 = psx_guest_(address + 0x440);
     D_800F5908 = address + 0x450;
-    D_800F5910 = address + 0x454;
+    D_800F5910 = psx_guest_(address + 0x454);
     D_800F58CC = address + 0x498;
     unsigned char* grid = vs_main_allocHeap(0x1038);
     if (!grid)
         pc_unimplemented("navigation allocation failed");
-    D_800F58BC = psx_to_int(unsigned, grid);
+    D_800F58BC = psx_guest_(psx_to_int(unsigned, grid));
     func_800E4288(grid, 0x1038);
-    D_800F58B8 = psx_to_int(unsigned, grid + 0x38);
-    D_800F58D0 = psx_to_int(unsigned, grid + 0x838);
+    D_800F58B8 = psx_guest_(psx_to_int(unsigned, grid + 0x38));
+    D_800F58D0 = psx_guest_(psx_to_int(unsigned, grid + 0x838));
     unsigned short* heights = (unsigned short*)(grid + 0x838);
     unsigned short* cells = (unsigned short*)(grid + 0x38);
     unsigned size = _getCollisionMapDimensions(0);

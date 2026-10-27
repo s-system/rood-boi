@@ -3,7 +3,8 @@
 #include "psx_types.h" /* psx_load/psx_store: 4-byte guest pointers */
 extern unsigned char *D_800F5878[], *vs_battle_actors[];
 /* Guest words at 0x800F58xx: 32-bit guest addresses. */
-extern unsigned D_800F58B8, D_800F58BC, D_800F590C, D_800F5920;
+extern unsigned D_800F590C;
+extern unsigned long D_800F58B8, D_800F58BC, D_800F5920; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 extern void func_800E5240(unsigned);
 extern void func_80095B7C(int, int);
 extern void func_800DBF00(void*);
@@ -79,22 +80,23 @@ void func_800E7454(void* actor)
     unsigned type = *(unsigned short*)(node + 0x1a);
     if (type == 0xac || type == 0xad) {
         void* data = psx_to_ptr(void*, D_800F5920);
-        D_800F5920 = 0;
+        D_800F5920 = psx_guest_(0);
         vs_main_freeHeap(data);
     }
 }
 
-extern unsigned D_800F58D0, D_800F58C0;
+extern unsigned D_800F58C0;
+extern unsigned long D_800F58D0; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 /* 7E05C.s: unload the remaining linked actors, then release navigation storage. */
 void func_800E6F1C(void)
 {
     for (unsigned char* node = vs_battle_actors[0]; node; node = psx_load(void*, node))
         func_800E7454(node);
-    D_800F58D0 = 0;
-    D_800F58B8 = 0;
+    D_800F58D0 = psx_guest_(0);
+    D_800F58B8 = psx_guest_(0);
     D_800F58C0 = 0;
     vs_main_freeHeap(psx_to_ptr(void*, D_800F58BC));
-    D_800F58BC = 0;
+    D_800F58BC = psx_guest_(0);
 }
 
 /* 7E05C.s: the room's height limit (word 0x14 of the D_800F58BC record), or 0

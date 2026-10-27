@@ -4,7 +4,7 @@ extern unsigned char _fontTable, D_800F4CB8, D_800F4E80;
 extern unsigned _fontBrightness;
 extern unsigned char vs_battle_characterWidths[];
 /* A 32-bit guest word holding the OT base (BATTLE 0x800F51B8). */
-extern unsigned D_800F51B8;
+extern unsigned long D_800F51B8; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 extern void pc_ui_precise_quad(const void* packet, const float* corners) __attribute__((weak));
 /* ui_text_layout line (ui_text.c): which glyphs one string sets. */
 extern void pc_text_glyph(void* const* commands, int count, int glyph, int x, int y, int next_x, int advance)

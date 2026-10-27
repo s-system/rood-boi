@@ -264,7 +264,7 @@ int func_800DC48C(int action, int id) { return action_target_bit(action, id, 14)
 
 extern int D_800F58F0;
 extern unsigned D_800F58F4;
-extern unsigned D_800F58F8; /* a 32-bit guest address */
+extern unsigned long D_800F58F8; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */ /* a 32-bit guest address */
 /* 73C84.s: remember the first candidate for each action slot whose action has
  * flag 0x40, up to 16 entries. The slot bit is set even when the list is full. */
 void func_800DC4F0(void* candidate, void* info)
@@ -311,7 +311,7 @@ int func_800E4CF4(void* state, void* candidate, int id)
     return 1;
 }
 
-extern unsigned D_800F5904; /* a 32-bit guest address */
+extern unsigned long D_800F5904; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */ /* a 32-bit guest address */
 /* 73B0C.s: append a scored candidate (up to 16, nonzero weight) to the state's
  * list at 0x2F0, record its pointer at 0x430, and mark (target, action) used. */
 void func_800DC344(void* state, void* candidate)
@@ -422,7 +422,7 @@ void func_800D9DD8(void* state)
     func_800DD7CC(base, base + 0x134);
 }
 
-extern unsigned D_800F58B8;
+extern unsigned long D_800F58B8; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 extern unsigned D_800F590C;
 extern int D_800F58D4;
 extern void func_800E65DC(void); /* pc/src/actor_update.c */

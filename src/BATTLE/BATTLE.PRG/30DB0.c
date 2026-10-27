@@ -1164,14 +1164,10 @@ int _parseShp(vs_battle_objectData* object)
     data += 4;
     model = vs_main_allocHeap(size);
     memcpy(model, data, size);
-    psx_set(
-        model->akaoOffset, (char*)psx_get(model->akaoOffset) + psx_to_int(u_int, model));
-    psx_set(model->groupOffset,
-        (char*)psx_get(model->groupOffset) + psx_to_int(u_int, model));
-    psx_set(model->vertexOffset,
-        (char*)psx_get(model->vertexOffset) + psx_to_int(u_int, model));
-    psx_set(
-        model->polyOffset, (char*)psx_get(model->polyOffset) + psx_to_int(u_int, model));
+    psx_relocate(model->akaoOffset, psx_to_int(u_int, model));
+    psx_relocate(model->groupOffset, psx_to_int(u_int, model));
+    psx_relocate(model->vertexOffset, psx_to_int(u_int, model));
+    psx_relocate(model->polyOffset, psx_to_int(u_int, model));
     psx_set(actor->unk0.unk68, model);
     if (model == NULL) {
         return -2;
@@ -1778,8 +1774,8 @@ int _loadSeq(vs_battle_objectData* object)
         actor->unk5B1 = object->modelId;
     copy:
         vs_main_memcpy(seq, D_800F22E4, size);
-        psx_set(seq->unk0, (char*)psx_get(seq->unk0) + psx_to_int(u_int, seq));
-        psx_set(seq->unk4, (char*)psx_get(seq->unk4) + psx_to_int(u_int, seq));
+        psx_relocate(seq->unk0, psx_to_int(u_int, seq));
+        psx_relocate(seq->unk4, psx_to_int(u_int, seq));
         return 0;
     } else if (object->actorId == 3) {
         D_800F22E4 += 4;
@@ -1828,12 +1824,10 @@ int _loadSeq(vs_battle_objectData* object)
             D_800F22E4 += 4;
         }
         for (i = 0; i < count; ++i) {
-            D_800F4810[slot][i] += psx_to_int(u_int, D_800F22E4);
+            psx_relocate_ptr(D_800F4810[slot][i], psx_to_int(u_int, D_800F22E4));
             seq = (func_8009C378_t*)(D_800F4810[slot][i] + 8);
-            psx_set(seq->unk0,
-                (char*)psx_get(seq->unk0) + psx_to_int(u_int, D_800F4810[slot][i] + 8));
-            psx_set(seq->unk4,
-                (char*)psx_get(seq->unk4) + psx_to_int(u_int, D_800F4810[slot][i] + 8));
+            psx_relocate(seq->unk0, psx_to_int(u_int, D_800F4810[slot][i] + 8));
+            psx_relocate(seq->unk4, psx_to_int(u_int, D_800F4810[slot][i] + 8));
         }
         D_800F4810[slot][i] = (char*)-1;
         for (i = 0; i < 17; ++i) {

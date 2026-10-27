@@ -18,7 +18,7 @@
 
 extern void pc_unimplemented(const char*);
 /* A 32-bit guest word: the battle menu state block's address. */
-extern u_int D_800EB9B8;
+extern unsigned long D_800EB9B8; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 extern u_short D_800EA130[]; /* 0x8000 / n; indexed past its end as the original */
 extern u_short D_800EA6B0[]; /* edge -> pair of neighbouring cell indices */
 extern short D_800EA818[];   /* 40-entry sine table: sin at i, cos at i + 8 */

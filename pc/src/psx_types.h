@@ -54,11 +54,18 @@
 #ifndef ROOD_GUEST_BASE
 #define ROOD_GUEST_BASE 0UL
 #endif
+/* Native code lies outside the guest window: a function pointer stored in a
+ * 4-byte field becomes a code token (PSX_CODE_TOKEN + 4 * index), which the
+ * runtime maps back (boot_runtime.c). Only with a guest base. */
+#define PSX_CODE_TOKEN 0xF0000000u
+extern __UINT32_TYPE__ pc_psx_code_token(const void* code);
+extern __UINTPTR_TYPE__ pc_psx_code_native(__UINT32_TYPE__ token);
 /* A 32-bit guest address as a host pointer value: zero stays null. */
 #define psx_guest_(value)                                                      \
-    ((__UINTPTR_TYPE__)(__UINT32_TYPE__)(value)                                \
-         ? ROOD_GUEST_BASE | (__UINTPTR_TYPE__)(__UINT32_TYPE__)(value)       \
-         : (__UINTPTR_TYPE__)0)
+    (!(__UINT32_TYPE__)(value) ? (__UINTPTR_TYPE__)0                           \
+     : ROOD_GUEST_BASE && (__UINT32_TYPE__)(value) >= PSX_CODE_TOKEN           \
+         ? pc_psx_code_native((__UINT32_TYPE__)(value))                        \
+         : ROOD_GUEST_BASE | (__UINTPTR_TYPE__)(__UINT32_TYPE__)(value))
 
 /* A 4-byte, 4-aligned guest address that remembers its target type T. The
  * zero-length member costs no storage; only its type is used. */
@@ -76,6 +83,11 @@ extern void pc_psx_bad_pointer(const void* pointer)
 static inline __UINT32_TYPE__ psx_addr(const void* pointer) {
     __UINTPTR_TYPE__ value = (__UINTPTR_TYPE__)pointer;
     if ((value >> 32) != (ROOD_GUEST_BASE >> 32) && value) {
+        if (ROOD_GUEST_BASE) {
+            /* code becomes a token; a guest address missing its base
+             * (below 4 GB) is kept; anything else stops */
+            return pc_psx_code_token(pointer);
+        }
         pc_psx_bad_pointer(pointer);
     }
     return (__UINT32_TYPE__)value;
@@ -89,6 +101,15 @@ static inline __UINT32_TYPE__ psx_addr(const void* pointer) {
     ((void)sizeof((__typeof__((field).psx_type_[0])){0} = (pointer)),          \
      (field).raw = psx_addr(pointer))
 #define psx_copy(dst, src) ((dst).raw = (src).raw)
+/* field = (char*)field + address, the field holding an offset that becomes a
+ * pointer (file relocations): added as 32-bit words as on the PS1, so a zero
+ * offset (null as a pointer) still yields the address. */
+#define psx_relocate(field, address) ((field).raw += (__UINT32_TYPE__)(address))
+/* The same for a native pointer that holds an offset (psx_load of a file
+ * word): ptr += address in 32 bits, the result a guest pointer. */
+#define psx_relocate_ptr(pointer, address)                                     \
+    ((pointer) = (__typeof__(pointer))psx_guest_(                              \
+         (__UINT32_TYPE__)(__UINTPTR_TYPE__)(pointer) + (__UINT32_TYPE__)(address)))
 #define psx_raw(field) ((field).raw)
 /* field++ and field += n: pointer arithmetic in units of T, same results;
  * field is evaluated once. */
@@ -135,12 +156,16 @@ static inline __UINT32_TYPE__ psx_addr(const void* pointer) {
 #define psx_get(field) (field)
 #define psx_set(field, pointer) ((field) = (pointer))
 #define psx_copy(dst, src) ((dst) = (src))
+#define psx_relocate(field, address)                                           \
+    ((field) = (__typeof__(field))((char*)(field) + (address)))
+#define psx_relocate_ptr(pointer, address) ((pointer) += (address))
 #define psx_raw(field) ((unsigned long)(field))
 #define psx_postinc(field) ((field)++)
 #define psx_add(field, n) ((field) += (n))
 #define psx_set_raw(field, T, value) ((field) = (T)(value))
 #define psx_to_ptr(T, value) ((T)(value))
 #define psx_to_int(T, pointer) ((T)(pointer))
+#define psx_guest_(value) ((unsigned long)(value))
 #define psx_word(value) ((unsigned long)(value))
 
 #endif

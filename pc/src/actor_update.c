@@ -2,7 +2,8 @@
  * its own stack; scratchpad data layout and explicit missing callees remain. */
 #include "psx_types.h" /* psx_load/psx_store: 4-byte guest pointers */
 extern unsigned char *D_800F5878[], *D_800F4538[], *vs_battle_actors[];
-extern unsigned D_800F58BC, D_800F58D0, D_800F58B8, D_800F58CC, D_800F58C0, D_800F58C4;
+extern unsigned D_800F58CC, D_800F58C0, D_800F58C4;
+extern unsigned long D_800F58BC, D_800F58D0, D_800F58B8; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 extern unsigned D_800F16E0, D_800F16E4, D_800F16E8, D_800F16EC, D_800F16F0;
 extern void pc_unimplemented(const char*);
 extern int func_800E45B4(void);

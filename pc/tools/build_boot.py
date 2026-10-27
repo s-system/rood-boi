@@ -2054,9 +2054,13 @@ def lp64_native_imports():
     # names interior elements separately (vs_battle_actors[1] is also
     # D_800F192C), so a region is one native block where every 4-byte PS1
     # pointer word becomes 8 bytes and each name sits at twice its PS1 offset.
+    def pointer_slot(info):
+        # Host code that reads a pointer slot as a pointer-sized integer
+        # (unsigned long: guest address words written with psx_guest_).
+        return info.get("pointer_words") or info.get("type") in ("unsigned long", "long unsigned int")
     def pointer_words(name):
         infos = [info for _, info in declarations.get(declared_name(name), [])]
-        return any(changes(i) for i in infos) and all(i.get("pointer_words") for i in infos if changes(i))
+        return any(changes(i) for i in infos) and all(pointer_slot(i) for i in infos if changes(i))
     pointer_word_addresses = {(groups[n], addresses[n]) for n in data if pointer_words(n)}
     spans, problems = [], []
     for name in sorted(data):
@@ -2067,7 +2071,7 @@ def lp64_native_imports():
         if len({(info.get("size"), info.get("ps1_size")) for _, info in infos}) > 1:
             print(f"LP64 import {name}: declarations disagree: "
                   + ", ".join(f"{obj.stem}: {info.get('type')}" for obj, info in infos))
-        if not all(info.get("pointer_words") for info in changed):
+        if not all(pointer_slot(info) for info in changed):
             problems.append(f"{name} ({changed[0]['type']}: not only pointers)")
             continue
         address = addresses[name]

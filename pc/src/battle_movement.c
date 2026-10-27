@@ -4,7 +4,7 @@
  * callers test them. */
 #include "psx_types.h" /* psx_load/psx_store: 4-byte guest pointers */
 extern unsigned char *D_800F5878[], *D_800F4538[], *vs_battle_actors[];
-extern unsigned D_800F58D8; /* a 32-bit guest address */
+extern unsigned long D_800F58D8; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */ /* a 32-bit guest address */
 /* Scratchpad bytes and words; pointers kept there are 4-byte guest addresses
  * (SCRATCH_PTR), like every pointer stored inside the PS1-layout actor and AI
  * records read below by offset (psx_load/psx_store). */
@@ -145,7 +145,7 @@ void func_800DB820(void* state)
 
 extern unsigned char* D_800F45E0[];
 /* Guest words at 0x800F58xx hold 32-bit guest addresses (see psx_load). */
-extern unsigned D_800F58BC, D_800F58B8;
+extern unsigned long D_800F58BC, D_800F58B8; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 extern int func_800E4660(int, int, int);
 extern int vs_gte_rsqrt(int);
 
@@ -275,7 +275,7 @@ extern void func_800E4BD8(int);
 extern int func_800DFAF8(int, unsigned, int);
 extern int func_800D954C(void*, unsigned);
 extern void func_800DEEFC(void*, int);
-extern unsigned D_800F5910; /* guest address of the room's u16 link pairs */
+extern unsigned long D_800F5910; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */ /* guest address of the room's u16 link pairs */
 /* 766FC.s L800DF8A4: continue a route through a room link (gate). Byte 0x19B
  * is the gate bit the actor holds in the room flags (func_800E4BE0 by
  * func_800DFBCC), word 0x19C the far end it is heading to. Off a link tile
@@ -1758,7 +1758,7 @@ void func_800E4C8C(void* state)
 }
 
 /* Room-entry and actor bookkeeping helpers from 7BDD4.s and 7E05C.s. */
-extern unsigned D_800F58D0, D_800F5920;
+extern unsigned long D_800F58D0, D_800F5920; /* 8-byte native pointer slots (LP64 imports): psx_guest_ on write */
 extern void* vs_main_allocHeap(unsigned);
 extern void func_800E4288(void*, unsigned);
 
@@ -1915,7 +1915,7 @@ void func_800E7660(void* state)
 {
     (void)state;
     unsigned char* record = vs_main_allocHeap(0x20);
-    D_800F5920 = psx_to_int(unsigned, record);
+    D_800F5920 = psx_guest_(psx_to_int(unsigned, record));
     func_800E4288(record, 0x20);
     *(unsigned short*)(record + 0xc) = 0x384;
 }
