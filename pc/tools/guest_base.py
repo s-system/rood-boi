@@ -15,7 +15,7 @@ token back to its function (psx_types.h), and leaves zero (null) and full
 64-bit host pointers alone. Pointer to integer
 truncations need no change.
 
-Usage: guest_base.py BASE UNIT.i [OUT.i]   (BASE e.g. 0x200000000)
+Usage: guest_base.py BASE UNIT.i [OUT.i]   (BASE e.g. 0x10000000000)
 """
 import json
 import subprocess

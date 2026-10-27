@@ -10,6 +10,20 @@
 #endif
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h> /* _dyld_get_image_header: the image under ASLR */
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+/* Zeroed read-write memory at exactly `address`, or NULL when anything is
+ * mapped there: Linux's MAP_FIXED_NOREPLACE. (Darwin's mmap takes an address
+ * without MAP_FIXED as a loose hint, and MAP_FIXED replaces what is there:
+ * arm64 macOS reserves 0x180000000 up 8 GB for the dyld shared cache.) */
+static void* pc_map_fixed(uintptr_t address, size_t size)
+{
+    mach_vm_address_t at = address;
+    return mach_vm_allocate(mach_task_self(), &at, size, VM_FLAGS_FIXED) == KERN_SUCCESS ? (void*)(uintptr_t)at : NULL;
+}
+#endif
 #include <time.h>
 #include <signal.h>
 #include <unistd.h>
@@ -364,7 +378,6 @@ static void pc_crash_at(int sig, siginfo_t* info, void* context)
     write(2, line, len);
 #ifdef __APPLE__
     /* ASLR: where the image is, to resolve [stack] (atos -l). */
-    extern const void* _dyld_get_image_header(uint32_t index); /* <mach-o/dyld.h> */
     len = snprintf(line, sizeof line, "[crash] image at %p\n", _dyld_get_image_header(0));
     write(2, line, len);
 #endif
@@ -425,9 +438,93 @@ static int pc_is_code(uintptr_t p)
     return 0;
 #endif
 }
+#if defined(__APPLE__) && ROOD_GUEST_BASE
+/* The executable's statics inside the guest window. Game code keeps
+ * addresses of its own data in 4-byte fields (a decompiled overlay's static
+ * string passed to vs_battle_setTextBox), but ASLR puts the image above
+ * 4 GB: the whole image is mapped a second time inside the window (the
+ * same pages, mach_vm_remap without copy), and such a pointer gets that
+ * alias. Its place depends on the window's free room (image_alias); a save
+ * state is only exact between launches that chose the same one. */
+#include <mach-o/loader.h>
+static uint32_t image_alias; /* the alias's guest address (0: none) */
+static uintptr_t image_start, image_end;
+/* Whether guest [at, at + size) holds no mapping (the drivers map memory
+ * of their own; the window must be outside the dyld shared region:
+ * build_boot.py --guest-base 0x10000000000). */
+static int guest_room(uint64_t at, uint64_t size)
+{
+    mach_vm_address_t lo = ROOD_GUEST_BASE + at, hi = lo + size, address = lo;
+    while (address < hi) {
+        mach_vm_size_t region = 0;
+        natural_t depth = 64; /* the deepest level: the shared cache's mappings, not its submap */
+        struct vm_region_submap_info_64 info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (mach_vm_region_recurse(mach_task_self(), &address, &region, &depth, (vm_region_recurse_info_t)&info, &count)
+            != KERN_SUCCESS)
+            return 1; /* nothing mapped at or above */
+        if (address >= hi)
+            return 1;
+        if (address + region > lo)
+            return 0;
+        address += region;
+    }
+    return 1;
+}
+static void alias_image(void)
+{
+    const struct mach_header_64* h = (const struct mach_header_64*)_dyld_get_image_header(0);
+    const struct load_command* lc = (const struct load_command*)(h + 1);
+    uintptr_t text_vmaddr = 0, text_size = 0, top = 0;
+    for (uint32_t i = 0; i < h->ncmds; i++, lc = (const struct load_command*)((const char*)lc + lc->cmdsize)) {
+        if (lc->cmd != LC_SEGMENT_64)
+            continue;
+        const struct segment_command_64* seg = (const struct segment_command_64*)lc;
+        if (!strcmp(seg->segname, "__TEXT"))
+            text_vmaddr = seg->vmaddr, text_size = seg->vmsize;
+        if (strcmp(seg->segname, "__PAGEZERO") && strcmp(seg->segname, "__LINKEDIT") && seg->vmaddr + seg->vmsize > top)
+            top = seg->vmaddr + seg->vmsize;
+    }
+    uintptr_t start = (uintptr_t)h, size = top - text_vmaddr;
+    /* The first free place from 0xC3000000 up to the code tokens, then from
+     * the bottom; never over the guest's own ranges (scratchpad and I/O page,
+     * the game stack, the RAM). Executable pages cannot be aliased (code
+     * signing): __TEXT's place gets a copy (its constants: string literals),
+     * the data segments after it are the same pages. */
+    static const struct { uint32_t lo, hi; } spans[] = { { 0xC3000000u, PSX_CODE_TOKEN }, { 0x01000000u, 0x1F800000u },
+        { 0x1F810000u, 0x60000000u }, { 0x64000000u, 0x80000000u }, { 0x80200000u, 0xC3000000u } };
+    kern_return_t last = KERN_SUCCESS;
+    for (size_t k = 0; k < sizeof spans / sizeof spans[0]; k++)
+        for (uint64_t at = spans[k].lo; at + size <= spans[k].hi; at += 0x1000000u) {
+            mach_vm_address_t text = ROOD_GUEST_BASE + at, data = text + text_size;
+            if (!guest_room(at, size))
+                continue;
+            if ((last = mach_vm_allocate(mach_task_self(), &text, text_size, VM_FLAGS_FIXED)) != KERN_SUCCESS)
+                continue;
+            vm_prot_t current, maximum;
+            last = mach_vm_remap(mach_task_self(), &data, size - text_size, 0, VM_FLAGS_FIXED, mach_task_self(),
+                (mach_vm_address_t)(start + text_size), FALSE, &current, &maximum, VM_INHERIT_NONE);
+            if (last != KERN_SUCCESS) {
+                mach_vm_deallocate(mach_task_self(), text, text_size);
+                continue;
+            }
+            memcpy((void*)(uintptr_t)text, (const void*)start, text_size);
+            mach_vm_protect(mach_task_self(), text, text_size, FALSE, VM_PROT_READ);
+            image_alias = (uint32_t)at, image_start = start, image_end = start + size;
+            fprintf(stderr, "[lp64] the image's statics at guest %#x (%lu MB)\n", image_alias, (unsigned long)(size >> 20));
+            return;
+        }
+    fprintf(stderr, "[lp64] no room for the image (%lu MB) in the guest window (%d): its statics have no guest address\n",
+        (unsigned long)(size >> 20), last);
+}
+#endif
 uint32_t pc_psx_code_token(const void* code)
 {
     uintptr_t p = (uintptr_t)code;
+#if defined(__APPLE__) && ROOD_GUEST_BASE
+    if (image_alias && p >= image_start && p < image_end && !pc_is_code(p))
+        return image_alias + (uint32_t)(p - image_start);
+#endif
     if (!pc_is_code(p)) {
         /* Below 4 GB and not code: a guest address built without the base,
          * as relocations do from a zero offset ((char*)0 + address). */
@@ -566,8 +663,14 @@ static char* game_stack;
 static int game_stack_fixed;
 static void reserve_game_stack(void)
 {
+#ifdef __APPLE__
+    void* p = pc_map_fixed(GAME_STACK_BASE, GAME_STACK_SIZE);
+    if (!p)
+        p = MAP_FAILED;
+#else
     void* p = mmap((void*)(uintptr_t)GAME_STACK_BASE, GAME_STACK_SIZE, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+#endif
     if (p != MAP_FAILED && (uintptr_t)p == GAME_STACK_BASE) {
         game_stack = p;
         game_stack_fixed = 1;
@@ -622,6 +725,8 @@ static void* map_guest(uintptr_t address, size_t size)
 {
 #ifdef _WIN32
     return VirtualAlloc((void*)address, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#elif defined(__APPLE__)
+    return pc_map_fixed(address, size);
 #else
     void* p = mmap((void*)address, size, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
@@ -698,6 +803,9 @@ int main(int argc, char** argv)
      * layers especially) maps memory of its own, which must not land in the
      * guest's fixed ranges. */
     void* ram = map_guest(ROOD_GUEST_BASE + 0x80000000, 0x200000);
+#if defined(__APPLE__) && ROOD_GUEST_BASE
+    alias_image();
+#endif
 #if defined(_WIN32) || ROOD_GUEST_BASE
     /* Windows reserves in 64 KB granules: the scratchpad and the I/O page
      * (below) are one allocation. With a guest base they are mapped like

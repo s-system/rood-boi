@@ -2,7 +2,7 @@
 """Build the 64-bit port as a native macOS arm64 executable.
 
 Runs on the Mac, after the Linux guest-base build (build_boot.py --arch 64
---guest-base 0x200000000, in Docker) has written
+--guest-base 0x10000000000, in Docker) has written
 pc/build/boot64-gb/macos_manifest.json: every linked object in link order,
 its compile command, the edits made to it (section and symbol renames) and
 the data imports' addresses. Each object gets a Mach-O twin compiled by the
