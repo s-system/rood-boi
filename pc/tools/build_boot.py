@@ -764,6 +764,7 @@ build_stamp = Stamp(root, out, {
     "battle": battle, "no_audio": no_audio, "arch": parsed.arch, "target": parsed.target, "coff": coff,
     "engine_library": engine_library,
     "debug_compress": debug_compress,
+    "guest_base": parsed.guest_base,  # (the Mac's and the iPhone's builds differ only by it)
     "nrd": [nrd and nrd["libraries"], win_nrd and win_nrd["libraries"]], "toolchain": toolchain,
 })
 stamp_trees = [("src", None), ("include", None), ("config", None), ("build", None), ("pc/src", None),

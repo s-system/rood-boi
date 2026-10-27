@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <SDL3/SDL_timer.h> /* SDL_GetTicksNS: the catalog's stat throttle */
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -503,6 +504,15 @@ void read_catalog(const std::string& path, std::vector<Entry>& entries, std::map
 }
 const std::vector<Entry>& current_catalog()
 {
+    /* Called for every texture the materials match, every frame: the files'
+     * stamps (two stat calls, two getenv) are looked at twice a second, not
+     * at each call (on an iPhone they cost milliseconds a frame). Edits in
+     * the editor bump pending_serial and apply at once. */
+    static uint64_t checked_ns;
+    uint64_t now = SDL_GetTicksNS();
+    if (checked_ns && now - checked_ns < 500000000ull && applied_pending == pending_serial)
+        return catalog_cache.entries;
+    checked_ns = now;
     const long long a = stamp(catalog_path()), b = stamp(catalog_user_path());
     if (a != catalog_cache.shipped_stamp || b != catalog_cache.user_stamp || applied_pending != pending_serial) {
         applied_pending = pending_serial;

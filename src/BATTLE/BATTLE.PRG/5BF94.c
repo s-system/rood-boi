@@ -1353,8 +1353,23 @@ char* vs_battle_printf(char* dest, char* src)
                 }
                 break;
             case vs_char_printString:
+#ifdef ROOD_PC_LP64
+            {
+                /* A string slot nothing set (0): the PS1 read whatever was at
+                 * address 0; here it is reported and printed as nothing. */
+                int slot = (u_char)*src++;
+                char* string = psx_get(vs_battle_stringContext.strings[slot]);
+                if (!string) {
+                    extern void pc_unset_string(int slot, void* from); /* boot_runtime.c */
+                    pc_unset_string(slot, __builtin_return_address(0));
+                    break;
+                }
+                dest = vs_battle_printf(dest, string);
+            }
+#else
                 dest = vs_battle_printf(
                     dest, psx_get(vs_battle_stringContext.strings[(u_char)*src++]));
+#endif
                 break;
             default:
                 *dest++ = c;

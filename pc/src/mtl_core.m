@@ -35,6 +35,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <MetalFX/MetalFX.h>
 #include <dispatch/dispatch.h>
+#include <stdatomic.h>
 #include <mach-o/dyld.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <stdio.h>
@@ -258,7 +259,9 @@ static struct {
     int callback_count, callback_capacity;
     double gpu_ms; /* written by the completion handler */
 } frames[VK_FRAMES];
+static atomic_int drawables_queued; /* presented, not yet on screen (acquire_next_image) */
 static int perf = -1;
+static uint64_t drawable_wait_ns, encode_ns, frame_mark_ns; /* ROOD_PERF: the CPU's side of a frame */
 static double gpu_sum, gpu_max;
 static int gpu_count;
 static id<MTLCommandBuffer> last_committed;
@@ -623,6 +626,12 @@ extern void pc_perf_gpu_add(double ms) __attribute__((weak)); /* lighting_qualit
 void vk_frame_submit(VkSemaphore wait, VkPipelineStageFlags wait_stage, VkSemaphore signal)
 {
     (void)wait, (void)wait_stage, (void)signal; /* one queue: commit order is the order */
+    if (perf > 0) {
+        uint64_t now = SDL_GetTicksNS();
+        if (frame_mark_ns)
+            encode_ns += now - frame_mark_ns; /* (includes the game's time between presents: see the cpu line) */
+        frame_mark_ns = now;
+    }
     submit();
     vk.frame = (vk.frame + 1) % VK_FRAMES;
     wait_slot(vk.frame);
@@ -636,6 +645,9 @@ void vk_frame_submit(VkSemaphore wait, VkPipelineStageFlags wait_stage, VkSemaph
         if (++gpu_count == 300) {
             fprintf(stderr, "[perf] Metal GPU time per presented frame avg %.2f ms, max %.2f ms\n", gpu_sum / 300,
                 gpu_max);
+            fprintf(stderr, "[perf] Metal CPU per frame: drawable wait %.2f ms, recording %.2f ms\n",
+                drawable_wait_ns / 300 * 1e-6, encode_ns / 300 * 1e-6);
+            drawable_wait_ns = encode_ns = 0;
             if (section_total_count) {
                 char line[1024];
                 int used = snprintf(line, sizeof line, "[perf] GPU sections per frame:");
@@ -2081,10 +2093,19 @@ static VkResult acquire_next_image(VkDevice d, VkSwapchainKHR swapchain, uint64_
     CGSize size = sc->surface->layer.drawableSize;
     if ((uint32_t)size.width != sc->extent.width || (uint32_t)size.height != sc->extent.height)
         return VK_ERROR_OUT_OF_DATE_KHR;
+    /* Never wait for the display: the game paces itself (59.94 Hz), and
+     * nextDrawable blocks until a drawable is free (iOS always syncs to the
+     * display), which stacked a refresh on every frame. When every drawable
+     * is queued or on screen, this frame is not presented (as a mailbox
+     * swapchain drops one). */
+    if (atomic_load(&drawables_queued) >= (int)sc->surface->layer.maximumDrawableCount - 1)
+        return VK_NOT_READY;
     id<CAMetalDrawable> drawable;
+    uint64_t waited = SDL_GetTicksNS();
     @autoreleasepool {
         drawable = [[sc->surface->layer nextDrawable] retain];
     }
+    drawable_wait_ns += SDL_GetTicksNS() - waited;
     if (!drawable)
         return VK_TIMEOUT;
     int i = sc->next;
@@ -2105,6 +2126,11 @@ static VkResult queue_present(VkQueue q, const VkPresentInfoKHR* info)
             continue;
         /* After the frame's command buffer (committed first, same queue). */
         id<MTLCommandBuffer> cb = [queue commandBuffer];
+        atomic_fetch_add(&drawables_queued, 1);
+        [sc->drawables[i] addPresentedHandler:^(id<MTLDrawable> d) {
+            (void)d;
+            atomic_fetch_sub(&drawables_queued, 1); /* on screen (or dropped): the one it replaced is free */
+        }];
         [cb presentDrawable:sc->drawables[i]];
         [cb commit];
         [sc->drawables[i] release];

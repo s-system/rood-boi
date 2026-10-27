@@ -192,14 +192,27 @@ std::string clut_key(unsigned tpage, unsigned clut)
     if (depth >= 2)
         return "";
     int n = depth == 0 ? 16 : 256, cx = (int)(clut & 63) * 16, cy = (int)((clut >> 6) & 511);
+    /* Matching asks for the same palettes every frame (an MD5 of up to 512
+     * bytes each, the iPhone's largest CPU cost): kept per CLUT position and
+     * depth with an FNV-1a of its colours, hashed again only when they change. */
+    static std::unordered_map<uint32_t, std::pair<uint64_t, std::string>> cache;
+    uint16_t colours[256];
+    uint64_t fnv = 1469598103934665603ull;
+    for (int i = 0; i < n; i++) {
+        colours[i] = vram_at(cx + i, cy);
+        fnv = (fnv ^ colours[i]) * 1099511628211ull;
+    }
+    auto& slot = cache[(uint32_t)clut << 2 | depth];
+    if (!slot.second.empty() && slot.first == fnv)
+        return slot.second;
     Md5 m;
     for (int i = 0; i < n; i++) {
-        uint16_t c = vram_at(cx + i, cy);
-        uint8_t b[2] = { (uint8_t)c, (uint8_t)(c >> 8) };
+        uint8_t b[2] = { (uint8_t)colours[i], (uint8_t)(colours[i] >> 8) };
         m.add(b, 2);
     }
     char hex[11];
     m.hex(hex, 10);
+    slot = { fnv, hex };
     return hex;
 }
 

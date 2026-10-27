@@ -13,6 +13,7 @@
 #include "camera_stick.h"
 #include "button_prompts.h"
 #include "ui/ui_settings.h" /* binding capture: PC_UI_CAPTURE_* */
+#include "frame_cost.h" /* ROOD_PERF: where a frame's CPU time went */
 #ifdef ROOD_VULKAN
 #include "vk_hooks.h" /* ROOD_RENDERER=vulkan: vk_present.c */
 #endif
@@ -447,6 +448,9 @@ void pc_window_tick(void)
             if (++count == 300) {
                 fprintf(stderr, "[perf] frame work avg %.2f ms, max %.2f ms, %d/300 over budget\n",
                     work_sum / 300 / 1e6, work_max / 1e6, late);
+                char costs[2048]; /* where the CPU's time went (frame_cost.c), per vsync */
+                if (pc_cost_json(costs, sizeof costs, 1, NULL) > 0)
+                    fprintf(stderr, "[perf] cpu%s\n", costs);
                 count = late = 0;
                 work_sum = work_max = 0;
             }

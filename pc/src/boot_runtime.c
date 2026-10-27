@@ -186,6 +186,19 @@ void pc_unimplemented(const char* name)
     exit(2);
 }
 void pc_log(const char* message) { fprintf(stderr, "[boot] %s\n", message); }
+/* vs_battle_printf (64 bits): a string slot nothing set, printed as nothing. */
+void pc_unset_string(int slot, void* from)
+{
+    static int reported;
+    if (reported++ < 8)
+        fprintf(stderr, "[lp64] vs_battle_printf: string slot %d is unset (from %p, image at %p)\n", slot, from,
+#ifdef __APPLE__
+            (const void*)_dyld_get_image_header(0)
+#else
+            (void*)0
+#endif
+        );
+}
 /* ROOD_SYNC_DEBUG: who reads VRAM back (StoreImage callers). */
 void pc_store_image_debug(int x, int y, int w, int h, const void* caller)
 {
@@ -842,16 +855,46 @@ static void ios_files(void)
         symlink(from, to);
     }
     chdir(home);
-    /* First launch: the port's modern defaults (16:9, smoothed textures, MSAA). */
-    FILE* settings = fopen("pc/user/settings.cfg", "r");
+    /* The iPhone's defaults (16:9, smoothed textures; for its GPU and battery:
+     * no MSAA, the internal resolution at 2x that MetalFX enlarges, the Low
+     * lighting preset). A file from an earlier default set (no marker of
+     * this one) gets these keys replaced; the player's other settings stay. */
+    static const char* const keys[] = { "widescreen 1", "smooth_textures 1", "subpixel 1", "perspective_textures 1",
+        "aa off", "internal_resolution 2", "lighting_preset low" };
+    static const char marker[] = "pc/user/.ios_defaults_2";
+    FILE* settings = fopen(marker, "r");
     if (settings)
         fclose(settings);
-    else if ((settings = fopen("pc/user/settings.cfg", "w"))) {
-        fputs("widescreen 1\nsmooth_textures 1\nsubpixel 1\nperspective_textures 1\naa msaa4\n", settings);
-        fclose(settings);
+    else {
+        char text[16384] = "", kept[16384] = "";
+        if ((settings = fopen("pc/user/settings.cfg", "r"))) {
+            text[fread(text, 1, sizeof text - 1, settings)] = 0;
+            fclose(settings);
+        }
+        size_t k = 0;
+        for (char* line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+            int replaced = 0;
+            for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
+                size_t n = (size_t)(strchr(keys[i], ' ') - keys[i]);
+                replaced |= !strncmp(line, keys[i], n) && (line[n] == ' ' || !line[n]);
+            }
+            if (!replaced)
+                k += (size_t)snprintf(kept + k, sizeof kept - k, "%s\n", line);
+        }
+        if ((settings = fopen("pc/user/settings.cfg", "w"))) {
+            fputs(kept, settings);
+            for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+                fprintf(settings, "%s\n", keys[i]);
+            fclose(settings);
+        }
+        if ((settings = fopen(marker, "w")))
+            fclose(settings);
     }
     setenv("ROOD_RENDERER", "metal", 0);
     setenv("ROOD_SETTINGS", "pc/user/settings.cfg", 0);
+    setenv("ROOD_PERF", "1", 0); /* (while the iPhone is tuned: the GPU's time per frame in the console) */
+    extern int pc_cost_on; /* frame_cost.c: read ROOD_PERF before this ran */
+    pc_cost_on = 1;
 }
 #define main rood_main
 #endif
@@ -913,6 +956,26 @@ int main(int argc, char** argv)
     void* ram = map_guest(ROOD_GUEST_BASE + 0x80000000, 0x200000);
 #if defined(__APPLE__) && ROOD_GUEST_BASE
     alias_image();
+    /* The PS1's 2 MB of RAM repeat over 8 MB, and the whole is also at
+     * 0x00000000 (KUSEG) and 0xA0000000 (KSEG1): the same pages at every
+     * copy. The game reads through a null pointer now and then, and runs
+     * past the RAM's end (the loot menu's item text): on the PS1 it reads
+     * RAM there; inside a reserved window it would fault. */
+    if (ram && in_guest_window(ROOD_GUEST_BASE, 0x200000)) {
+        static const uint32_t segments[3] = { 0x00000000u, 0x80000000u, 0xA0000000u };
+        for (int i = 0; i < 3; i++)
+            for (uint32_t copy = 0; copy < 4; copy++) {
+                uint32_t guest = segments[i] + copy * 0x200000u;
+                if (guest == 0x80000000u)
+                    continue; /* the RAM itself */
+                mach_vm_address_t at = ROOD_GUEST_BASE + guest;
+                vm_prot_t current, maximum;
+                if (mach_vm_remap(mach_task_self(), &at, 0x200000, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                        mach_task_self(), (mach_vm_address_t)(uintptr_t)ram, FALSE, &current, &maximum, VM_INHERIT_NONE)
+                    != KERN_SUCCESS)
+                    fprintf(stderr, "[lp64] the RAM's mirror at %#x is not mapped\n", guest);
+            }
+    }
 #endif
 #if defined(_WIN32) || ROOD_GUEST_BASE
     /* Windows reserves in 64 KB granules: the scratchpad and the I/O page
