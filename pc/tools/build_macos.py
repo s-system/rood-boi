@@ -155,8 +155,10 @@ def darwin_text(data, table):
     # Assembler names given to C declarations (__asm__("CompMatrixLV")):
     # Mach-O's C symbols carry a leading underscore.
     data = re.sub(rb'__asm__\s*\(\s*"([A-Za-z]\w*)"\s*\)', rb'__asm__("_\1")', data)
-    # ELF section names (no segment): a Mach-O __DATA section each.
-    return re.sub(rb'section\s*\(\s*"([^",]+)"\s*\)',
+    # ELF section names (no segment) in section attributes: a Mach-O __DATA
+    # section each. Only ELF-looking names (".data.x", "rood_..."): the text
+    # also calls functions named section (the frame cost's labels).
+    return re.sub(rb'section\s*\(\s*"((?:\.|rood)[^",]*)"\s*\)',
                   lambda m: b'section("__DATA,' + short_section(m.group(1).decode(), table).encode() + b'")', data)
 
 
